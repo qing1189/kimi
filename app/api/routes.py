@@ -8,6 +8,7 @@ from ..kimi import Kimi2API
 
 from .auth import verify_api_key
 from .converters import (
+    _apply_tool_calls,
     _chat_completion_to_dict,
     _chat_to_responses_api_dict,
     _extract_conversation_id,
@@ -25,6 +26,7 @@ from .streaming import (
     _create_streaming_chat_response,
     _create_streaming_responses_response,
 )
+from .toolcall import has_tools, inject_tool_call_context
 
 router = APIRouter()
 
@@ -105,6 +107,10 @@ async def create_chat_completion(request: Request) -> Any:
     conversation_id = _extract_conversation_id(payload)
     stream = bool(payload.get("stream", False))
 
+    tools_enabled = has_tools(payload)
+    if tools_enabled:
+        messages = inject_tool_call_context(messages, payload.get("tools"))
+
     if stream:
         return StreamingResponse(
             _create_streaming_chat_response(
@@ -115,6 +121,7 @@ async def create_chat_completion(request: Request) -> Any:
                 messages=messages,
                 conversation_id=conversation_id,
                 enable_web_search=features["enable_web_search"],
+                tools_enabled=tools_enabled,
             ),
             media_type="text/event-stream",
             headers={
@@ -134,7 +141,10 @@ async def create_chat_completion(request: Request) -> Any:
             enable_web_search=features["enable_web_search"],
         )
         result.model = features["request_model"]
-        return _chat_completion_to_dict(result)
+        response = _chat_completion_to_dict(result)
+        if tools_enabled:
+            response = _apply_tool_calls(response)
+        return response
 
 
 # ---------------------------------------------------------------------------

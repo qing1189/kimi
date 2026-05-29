@@ -2,6 +2,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Union
 
 from ..kimi import ChatCompletion
+from .toolcall import parse_tool_calls_from_text
 
 
 def _normalize_messages(
@@ -64,6 +65,30 @@ def _chat_completion_to_dict(response: ChatCompletion) -> Dict[str, Any]:
         },
         "system_fingerprint": "fp_kimi2api",
     }
+
+
+def _apply_tool_calls(response: Dict[str, Any]) -> Dict[str, Any]:
+    """Parse a trailing DSML tool-call block out of the assistant message.
+
+    When tool calls are present, the message content is replaced with the text
+    preceding the block (``None`` if empty), ``tool_calls`` is populated, and
+    the choice's ``finish_reason`` becomes ``"tool_calls"``.
+    """
+    choices = response.get("choices") or []
+    if not choices:
+        return response
+
+    choice = choices[0]
+    message = choice.get("message") or {}
+    content, tool_calls = parse_tool_calls_from_text(message.get("content"))
+    if not tool_calls:
+        return response
+
+    message["content"] = content or None
+    message["tool_calls"] = tool_calls
+    choice["message"] = message
+    choice["finish_reason"] = "tool_calls"
+    return response
 
 
 def _response_api_to_chat_request(payload: Dict[str, Any]) -> Dict[str, Any]:

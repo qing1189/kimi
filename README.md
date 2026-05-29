@@ -1,7 +1,7 @@
 # Kimi2API
 
 Kimi2API 是一个基于 Kimi Web 协议封装的 OpenAI 兼容 API 服务。它把 Kimi 的聊天能力转换成常见的 `/v1` 接口，方便 OpenAI SDK、LobeChat、NextChat、one-api 风格客户端接入。
-_（简单来说，这就是用来玩酒馆的，没有做toolcall之类编程方向的优化，因为2api的能力懂得都懂）_
+_（最初主要面向酒馆类场景；现已通过 DSML 协议补充了 OpenAI 格式的工具调用 / Function Calling 支持，详见下文「工具调用」。底层仍是 2api，复杂 agent 场景请结合实际效果评估。）_
 
 项目内置 React 管理面板，支持 Kimi 账号池、对外 API Key、请求日志、运行概览和基础运维操作。
 
@@ -94,6 +94,7 @@ _（简单来说，这就是用来玩酒馆的，没有做toolcall之类编程�
 
 - OpenAI 兼容接口：Models、Chat Completions、Legacy Completions、Responses API。
 - 支持流式和非流式输出。
+- 支持 OpenAI 格式的工具调用（Function Calling）：通过 DSML 协议在 prompt 层实现，流式与非流式均可用。
 - 支持 Kimi thinking、search、agent 相关模型能力和兼容参数。
 - 支持多个 Kimi 账号组成账号池，按健康状态、并发占用和轮询策略调度。
 - 支持 refresh token 自动换取 access token，并把换到的 access token 缓存到本地，服务重启后可复用。
@@ -349,6 +350,107 @@ curl http://127.0.0.1:8000/v1/responses \
   }'
 ```
 
+### 工具调用 / Function Calling
+
+支持 OpenAI 标准的 `tools`（`type: "function"`）参数。由于 Kimi Web 后端没有原生 Function Calling，本服务在 prompt 层通过 **DSML 协议**实现：检测到 `tools` 后会注入一段描述工具与输出格式的系统提示，并把模型回复里的工具调用块解析回标准的 `tool_calls`。
+
+要点：
+
+- 仅 `/v1/chat/completions` 支持工具调用（OpenAI Function Calling 的标准端点）。
+- 流式和非流式都支持；命中工具调用时 `finish_reason` 为 `tool_calls`。
+- 支持 `tool_choice: "none"`（此时不注入工具）；支持多工具并行调用。
+- 内置联网搜索 `tools: [{"type": "web_search"}]` 与函数工具相互独立，互不影响。
+- 多轮对话请按 OpenAI 规范把上一轮的 `assistant.tool_calls` 和 `tool` 角色结果一并回传，服务会自动转换为模型可理解的上下文。
+
+非流式请求示例：
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your_api_key_here" \
+  -d '{
+    "model": "kimi-k2.6",
+    "messages": [
+      {"role": "user", "content": "深圳今天天气怎么样？"}
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "查询指定城市的天气",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {"type": "string", "description": "城市名称"}
+            },
+            "required": ["city"]
+          }
+        }
+      }
+    ]
+  }'
+```
+
+命中工具调用时，响应形如：
+
+```json
+{
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_xxxxxxxx",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": "{\"city\": \"深圳\"}"}
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ]
+}
+```
+
+OpenAI SDK 多轮（携带工具执行结果继续对话）：
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="your_api_key_here", base_url="http://127.0.0.1:8000/v1")
+
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "查询指定城市的天气",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    },
+}]
+
+messages = [{"role": "user", "content": "深圳今天天气怎么样？"}]
+first = client.chat.completions.create(model="kimi-k2.6", messages=messages, tools=tools)
+
+call = first.choices[0].message.tool_calls[0]
+messages.append(first.choices[0].message)
+messages.append({
+    "role": "tool",
+    "tool_call_id": call.id,
+    "content": '{"temp": "28C", "weather": "晴"}',
+})
+
+second = client.chat.completions.create(model="kimi-k2.6", messages=messages, tools=tools)
+print(second.choices[0].message.content)
+```
+
 ## 模型和参数
 
 `/v1/models` 会从 Kimi Web 的 `GetAvailableModels` 动态获取真实可用模型。模型 ID 按 Kimi Web 返回的工作配置生成，例如：
@@ -374,6 +476,7 @@ curl http://127.0.0.1:8000/v1/responses \
 
 - thinking：`enable_thinking`、`reasoning`
 - search：`kimi-k2.6-search`、`kimi-k2.6-thinking-search`；也兼容 OpenAI 风格 `tools: [{"type": "web_search"}]`、`tools: [{"type": "web_search_preview"}]`、`web_search_options`；旧字段 `enable_web_search`、`web_search`、`search` 继续保留以兼容已有接入
+- 工具调用：`tools: [{"type": "function", ...}]`（函数工具）与上面的 `web_search` 工具相互独立，可单独或同时使用，详见上文「工具调用 / Function Calling」；`tool_choice` 支持 `"none"`（关闭工具）
 
 ### 上下文处理
 

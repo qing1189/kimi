@@ -6,6 +6,7 @@ from fastapi import Request
 
 from ..kimi import Kimi2API, KimiAPIError, ChatCompletionChunk
 from ..kimi.model_catalog import KimiModelSpec
+from .toolcall import ToolCallSieve
 
 logger = logging.getLogger("kimi2api.api")
 
@@ -45,18 +46,90 @@ def _mark_kimi_account(request: Optional[Request], account: Dict[str, str]) -> N
 async def _stream_chat_chunks(
     stream: AsyncIterator[ChatCompletionChunk],
     response_model: str,
+    tools_enabled: bool = False,
 ) -> AsyncIterator[str]:
+    sieve = ToolCallSieve() if tools_enabled else None
+    tool_calls_emitted = False
+
     async for chunk in stream:
-        payload = {
-            "id": chunk.id,
-            "object": chunk.object,
-            "created": chunk.created,
-            "model": response_model,
-            "choices": chunk.choices,
-            "system_fingerprint": "fp_kimi2api",
-        }
-        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        if sieve is None:
+            yield _chat_chunk_sse(chunk, response_model, chunk.choices)
+            continue
+
+        choice = chunk.choices[0] if chunk.choices else {}
+        delta = choice.get("delta", {})
+        finish_reason = choice.get("finish_reason")
+
+        if delta.get("content"):
+            text_delta, tool_calls_delta = sieve.push(delta["content"])
+            if text_delta:
+                yield _chat_chunk_sse(
+                    chunk,
+                    response_model,
+                    [{"index": 0, "delta": {"content": text_delta}, "finish_reason": None}],
+                )
+            if tool_calls_delta:
+                tool_calls_emitted = True
+                yield _chat_chunk_sse(
+                    chunk,
+                    response_model,
+                    [
+                        {
+                            "index": 0,
+                            "delta": {"tool_calls": tool_calls_delta},
+                            "finish_reason": None,
+                        }
+                    ],
+                )
+            continue
+
+        if finish_reason is not None:
+            text_delta, tool_calls_delta = sieve.flush()
+            if text_delta:
+                yield _chat_chunk_sse(
+                    chunk,
+                    response_model,
+                    [{"index": 0, "delta": {"content": text_delta}, "finish_reason": None}],
+                )
+            if tool_calls_delta:
+                tool_calls_emitted = True
+                yield _chat_chunk_sse(
+                    chunk,
+                    response_model,
+                    [
+                        {
+                            "index": 0,
+                            "delta": {"tool_calls": tool_calls_delta},
+                            "finish_reason": None,
+                        }
+                    ],
+                )
+            final_reason = "tool_calls" if tool_calls_emitted else finish_reason
+            yield _chat_chunk_sse(
+                chunk,
+                response_model,
+                [{"index": 0, "delta": {}, "finish_reason": final_reason}],
+            )
+            continue
+
+        yield _chat_chunk_sse(chunk, response_model, chunk.choices)
     yield "data: [DONE]\n\n"
+
+
+def _chat_chunk_sse(
+    chunk: ChatCompletionChunk,
+    response_model: str,
+    choices: List[Dict[str, Any]],
+) -> str:
+    payload = {
+        "id": chunk.id,
+        "object": chunk.object,
+        "created": chunk.created,
+        "model": response_model,
+        "choices": choices,
+        "system_fingerprint": "fp_kimi2api",
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 async def _stream_responses_chunks(
@@ -100,6 +173,7 @@ async def _create_streaming_chat_response(
     messages: List[Dict[str, Any]],
     conversation_id: Optional[str],
     enable_web_search: bool,
+    tools_enabled: bool = False,
 ) -> AsyncIterator[str]:
     client: Optional[Kimi2API] = None
     try:
@@ -112,7 +186,7 @@ async def _create_streaming_chat_response(
             conversation_id=conversation_id,
             enable_web_search=enable_web_search,
         )
-        async for chunk in _stream_chat_chunks(stream, response_model):
+        async for chunk in _stream_chat_chunks(stream, response_model, tools_enabled):
             yield chunk
     except KimiAPIError as exc:
         _mark_stream_error(request, str(exc), exc)
