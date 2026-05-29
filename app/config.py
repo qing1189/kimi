@@ -49,6 +49,10 @@ class Config:
     KIMI_ACCEPT_LANGUAGE: str = "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7"
     KIMI_MAX_CONCURRENCY: int = 2
     KIMI_MIN_REQUEST_INTERVAL: float = 0.5
+    KIMI_REQUEST_INTERVAL_JITTER: float = 0.0
+    KIMI_MAX_REQUESTS_PER_MINUTE: int = 0
+    KIMI_MAX_REQUESTS_PER_HOUR: int = 0
+    KIMI_AUTO_PROBE_INTERVAL: float = 300.0
     TIMEOUT: int = 120
     DEFAULT_MODEL: str = ""
     OPENAI_API_KEY: str = ""
@@ -73,6 +77,18 @@ class Config:
         )
         cls.KIMI_MAX_CONCURRENCY = max(int(os.getenv("KIMI_MAX_CONCURRENCY", "2")), 1)
         cls.KIMI_MIN_REQUEST_INTERVAL = max(float(os.getenv("KIMI_MIN_REQUEST_INTERVAL", "0.5")), 0.0)
+        cls.KIMI_REQUEST_INTERVAL_JITTER = max(
+            float(os.getenv("KIMI_REQUEST_INTERVAL_JITTER", "0.0")), 0.0
+        )
+        cls.KIMI_MAX_REQUESTS_PER_MINUTE = max(
+            int(os.getenv("KIMI_MAX_REQUESTS_PER_MINUTE", "0")), 0
+        )
+        cls.KIMI_MAX_REQUESTS_PER_HOUR = max(
+            int(os.getenv("KIMI_MAX_REQUESTS_PER_HOUR", "0")), 0
+        )
+        cls.KIMI_AUTO_PROBE_INTERVAL = max(
+            float(os.getenv("KIMI_AUTO_PROBE_INTERVAL", "300")), 0.0
+        )
         cls.TIMEOUT = int(os.getenv("TIMEOUT", "120"))
         cls.DEFAULT_MODEL = os.getenv("MODEL", "")
         cls.OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")

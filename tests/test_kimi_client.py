@@ -175,7 +175,7 @@ async def test_sync_chat_switches_accounts_when_first_fails_before_output(tmp_da
 
     async def fake_iter(runtime, _content, _context):
         calls.append(runtime.account_id)
-        if runtime.account_id == "acc-a":
+        if len(calls) == 1:
             raise KimiAPIError(
                 "rate limited",
                 upstream_status_code=429,
@@ -197,10 +197,12 @@ async def test_sync_chat_switches_accounts_when_first_fails_before_output(tmp_da
         await client.close()
         await close_account_pool()
 
-    assert calls == ["acc-a", "acc-b"]
+    assert len(calls) == 2
+    assert set(calls) == {"acc-a", "acc-b"}
     assert result.choices[0].message.content == "fallback ok"
-    assert pool.account_infos()[0]["token_healthy"] is False
-    assert "冷却" in pool.account_infos()[0]["token_status"]
+    cooled = next(info for info in pool.account_infos() if info["id"] == calls[0])
+    assert cooled["token_healthy"] is False
+    assert "冷却" in cooled["token_status"]
 
 
 @pytest.mark.asyncio
@@ -217,7 +219,7 @@ async def test_stream_chat_switches_only_before_first_chunk(tmp_data_dir):
 
     async def fake_iter(runtime, _content, _context):
         calls.append(runtime.account_id)
-        if runtime.account_id == "acc-a":
+        if len(calls) == 1:
             raise KimiAPIError(
                 "server error",
                 upstream_status_code=500,
@@ -241,7 +243,8 @@ async def test_stream_chat_switches_only_before_first_chunk(tmp_data_dir):
         await client.close()
         await close_account_pool()
 
-    assert calls == ["acc-a", "acc-b"]
+    assert len(calls) == 2
+    assert set(calls) == {"acc-a", "acc-b"}
     assert chunks[0].choices[0]["delta"]["role"] == "assistant"
     assert chunks[1].choices[0]["delta"]["content"] == "stream fallback"
 
@@ -283,4 +286,4 @@ async def test_stream_chat_does_not_switch_after_chunk_is_sent(tmp_data_dir):
         await client.close()
         await close_account_pool()
 
-    assert calls == ["acc-a"]
+    assert len(calls) == 1

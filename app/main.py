@@ -409,9 +409,14 @@ def create_app(initialize: bool = True, static_dir: Optional[str] = None) -> Fas
         return spa_fallback_response(path)
 
     if initialize:
+        async def start_runtime_event() -> None:
+            from .core.kimi_account_pool import start_auto_probe
+            start_auto_probe()
+
         async def shutdown_runtime_event() -> None:
             await shutdown_runtime()
 
+        app.router.add_event_handler("startup", start_runtime_event)
         app.router.add_event_handler("shutdown", shutdown_runtime_event)
 
     return app

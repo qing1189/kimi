@@ -25,11 +25,22 @@ class KimiClientIdentity:
 
 
 class KimiRateLimiter:
-    def __init__(self, max_concurrency: int, min_interval_seconds: float):
+    def __init__(
+        self,
+        max_concurrency: int,
+        min_interval_seconds: float,
+        jitter_seconds: float = 0.0,
+    ):
         self._semaphore = asyncio.Semaphore(max(int(max_concurrency), 1))
         self._min_interval_seconds = max(float(min_interval_seconds), 0.0)
+        self._jitter_seconds = max(float(jitter_seconds), 0.0)
         self._lock = asyncio.Lock()
         self._next_request_at = 0.0
+
+    def _interval(self) -> float:
+        if self._jitter_seconds <= 0:
+            return self._min_interval_seconds
+        return self._min_interval_seconds + random.uniform(0.0, self._jitter_seconds)
 
     async def _wait_for_turn(self) -> None:
         async with self._lock:
@@ -38,7 +49,7 @@ class KimiRateLimiter:
             if delay > 0:
                 await asyncio.sleep(delay)
                 now = time.monotonic()
-            self._next_request_at = max(now, self._next_request_at) + self._min_interval_seconds
+            self._next_request_at = max(now, self._next_request_at) + self._interval()
 
     @asynccontextmanager
     async def slot(self) -> AsyncIterator[None]:
@@ -51,7 +62,7 @@ class KimiRateLimiter:
 
 
 _rate_limiter: Optional[KimiRateLimiter] = None
-_rate_limiter_settings: Optional[Tuple[int, float]] = None
+_rate_limiter_settings: Optional[Tuple[int, float, float]] = None
 _process_session_id = generate_session_id()
 
 
@@ -65,6 +76,7 @@ def get_rate_limiter() -> KimiRateLimiter:
     settings = (
         max(int(Config.KIMI_MAX_CONCURRENCY), 1),
         max(float(Config.KIMI_MIN_REQUEST_INTERVAL), 0.0),
+        max(float(getattr(Config, "KIMI_REQUEST_INTERVAL_JITTER", 0.0)), 0.0),
     )
     if _rate_limiter is None or _rate_limiter_settings != settings:
         _rate_limiter = KimiRateLimiter(*settings)

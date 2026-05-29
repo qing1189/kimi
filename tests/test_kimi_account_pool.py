@@ -165,7 +165,8 @@ async def test_client_treats_empty_account_pool_as_unconfigured(
 
 
 @pytest.mark.asyncio
-async def test_pool_selects_least_busy_account_and_round_robins(tmp_data_dir):
+async def test_pool_uses_all_accounts_and_bounds_call_gap(tmp_data_dir):
+    from app.core.account_scheduler import MAX_CALL_GAP
     from app.core.kimi_account_pool import KimiAccountPool
     from app.core.kimi_account_store import KimiAccountConfig
 
@@ -196,16 +197,145 @@ async def test_pool_selects_least_busy_account_and_round_robins(tmp_data_dir):
     pool = KimiAccountPool(accounts, base_url="https://kimi.example.test")
 
     try:
+        # max_concurrency=1 forces two concurrent acquisitions onto distinct accounts.
         async with pool.acquire() as first:
             async with pool.acquire() as second:
                 assert {first.account_id, second.account_id} == {"acc-a", "acc-b"}
 
-        async with pool.acquire() as third:
-            third_id = third.account_id
-        async with pool.acquire() as fourth:
-            fourth_id = fourth.account_id
+        # Selection is random (not strict round-robin), but over many sequential
+        # calls both accounts get used and the call-count gap stays bounded.
+        for _ in range(200):
+            async with pool.acquire():
+                pass
 
-        assert [third_id, fourth_id] == ["acc-a", "acc-b"]
+        counts = {info["id"]: info["call_count"] for info in pool.account_infos()}
+        assert all(count > 0 for count in counts.values())
+        assert abs(counts["acc-a"] - counts["acc-b"]) <= MAX_CALL_GAP
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_pool_transient_failures_lower_weight_until_cooldown(tmp_data_dir):
+    from app.core import account_scheduler as scheduler
+    from app.core.kimi_account_pool import KimiAccountPool
+    from app.core.kimi_account_store import KimiAccountConfig
+
+    account = KimiAccountConfig(
+        id="acc-weight",
+        name="Weight",
+        raw_token="token-a",
+        enabled=True,
+        max_concurrency=1,
+        min_interval_seconds=0,
+        device_id="1111111111111111111",
+        created_at=1,
+        updated_at=1,
+    )
+    pool = KimiAccountPool([account], base_url="https://kimi.example.test")
+    runtime = pool._runtimes[0]
+
+    try:
+        assert runtime.weight == scheduler.WEIGHT_INITIAL
+
+        # One transient failure lowers the weight but does not pause the account.
+        async with pool.acquire() as acquired:
+            pool.record_failure(
+                acquired,
+                KimiAPIError("network", upstream_error_type="network_error"),
+            )
+        assert runtime.weight == scheduler.WEIGHT_INITIAL - scheduler.WEIGHT_TRANSIENT_FAILURE_STEP
+        assert not runtime.is_cooling_down()
+
+        # Keep failing until the weight hits the floor and the account is paused.
+        failures = 1
+        while not runtime.is_cooling_down() and failures < 20:
+            async with pool.acquire(require_selectable=False) as acquired:
+                pool.record_failure(
+                    acquired,
+                    KimiAPIError("network", upstream_error_type="network_error"),
+                )
+            failures += 1
+
+        assert runtime.is_cooling_down()
+        assert runtime.weight <= scheduler.WEIGHT_COOLDOWN_THRESHOLD
+        # 100 -> 80 -> 60 -> 40 -> 20 == 4 transient failures.
+        assert failures == 4
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_pool_restores_partial_weight_after_cooldown(tmp_data_dir):
+    from app.core import account_scheduler as scheduler
+    from app.core.kimi_account_pool import KimiAccountPool
+    from app.core.kimi_account_store import KimiAccountConfig
+
+    account = KimiAccountConfig(
+        id="acc-recover",
+        name="Recover",
+        raw_token="token-a",
+        enabled=True,
+        max_concurrency=1,
+        min_interval_seconds=0,
+        device_id="1111111111111111111",
+        created_at=1,
+        updated_at=1,
+    )
+    pool = KimiAccountPool([account], base_url="https://kimi.example.test")
+    runtime = pool._runtimes[0]
+
+    try:
+        for _ in range(4):
+            async with pool.acquire(require_selectable=False) as acquired:
+                pool.record_failure(
+                    acquired,
+                    KimiAPIError("network", upstream_error_type="network_error"),
+                )
+
+        assert runtime.is_cooling_down()
+        assert runtime.weight == scheduler.WEIGHT_COOLDOWN_THRESHOLD
+
+        # Simulate the cooldown window elapsing.
+        runtime.cooldown_until = time.time() - 1
+        infos = pool.account_infos()
+
+        assert runtime.cooldown_until == 0.0
+        assert runtime.weight == scheduler.WEIGHT_RECOVERY_VALUE
+        assert infos[0]["token_healthy"] is True
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_pool_success_increases_weight_capped(tmp_data_dir):
+    from app.core import account_scheduler as scheduler
+    from app.core.kimi_account_pool import KimiAccountPool
+    from app.core.kimi_account_store import KimiAccountConfig
+
+    account = KimiAccountConfig(
+        id="acc-success",
+        name="Success",
+        raw_token="token-a",
+        enabled=True,
+        max_concurrency=1,
+        min_interval_seconds=0,
+        device_id="1111111111111111111",
+        created_at=1,
+        updated_at=1,
+    )
+    pool = KimiAccountPool([account], base_url="https://kimi.example.test")
+    runtime = pool._runtimes[0]
+
+    try:
+        runtime.weight = 50.0
+        async with pool.acquire() as acquired:
+            pool.record_success(acquired)
+        assert runtime.weight == 50.0 + scheduler.WEIGHT_SUCCESS_STEP
+
+        runtime.weight = scheduler.WEIGHT_MAX
+        pool.record_success(runtime)
+        assert runtime.weight == scheduler.WEIGHT_MAX
     finally:
         await pool.close()
 
@@ -491,3 +621,149 @@ def test_admin_validate_marks_rejected_access_token_unhealthy(
     listing = authenticated_admin_client.get("/admin/api/tokens").json()
     assert listing["summary"]["healthy"] == 0
     assert listing["summary"]["unhealthy"] == 1
+
+
+
+@pytest.mark.asyncio
+async def test_pool_quota_blocks_account_when_per_minute_cap_reached(
+    tmp_data_dir,
+    config_override,
+):
+    from app.core.kimi_account_pool import KimiAccountPool
+    from app.core.kimi_account_store import KimiAccountConfig
+
+    config_override(KIMI_MAX_REQUESTS_PER_MINUTE=3)
+
+    account = KimiAccountConfig(
+        id="acc-quota",
+        name="Quota",
+        raw_token="token-a",
+        enabled=True,
+        max_concurrency=1,
+        min_interval_seconds=0,
+        device_id="1111111111111111111",
+        created_at=1,
+        updated_at=1,
+    )
+    pool = KimiAccountPool([account], base_url="https://kimi.example.test")
+
+    try:
+        assert pool._runtimes[0].quota.per_minute == 3
+        for _ in range(3):
+            async with pool.acquire():
+                pass
+
+        with pytest.raises(KimiAPIError) as exc_info:
+            async with pool.acquire():
+                pass
+        assert "No available Kimi accounts" in str(exc_info.value)
+
+        info = pool.account_infos()[0]
+        assert info["quota_exhausted"] is True
+        assert info["token_status"] == "已达用量上限"
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_pool_rate_limit_cooldown_grows_with_consecutive_hits(tmp_data_dir):
+    from app.core import account_scheduler as scheduler
+    from app.core.kimi_account_pool import KimiAccountPool
+    from app.core.kimi_account_store import KimiAccountConfig
+
+    account = KimiAccountConfig(
+        id="acc-429",
+        name="RateLimited",
+        raw_token="token-a",
+        enabled=True,
+        max_concurrency=1,
+        min_interval_seconds=0,
+        device_id="1111111111111111111",
+        created_at=1,
+        updated_at=1,
+    )
+    pool = KimiAccountPool([account], base_url="https://kimi.example.test")
+    runtime = pool._runtimes[0]
+
+    def hit_429():
+        return KimiAPIError(
+            "rate limited",
+            upstream_status_code=429,
+            upstream_error_type="rate_limited",
+        )
+
+    try:
+        start = time.time()
+        async with pool.acquire() as acquired:
+            pool.record_failure(acquired, hit_429())
+        first = runtime.cooldown_until - start
+        assert runtime.rate_limit_strikes == 1
+        assert abs(first - scheduler.RATE_LIMIT_BACKOFF_BASE_SECONDS) < 5
+
+        runtime.cooldown_until = 0.0  # pretend the first window elapsed
+        start = time.time()
+        async with pool.acquire(account_id="acc-429", require_selectable=False) as acquired:
+            pool.record_failure(acquired, hit_429())
+        second = runtime.cooldown_until - start
+        assert runtime.rate_limit_strikes == 2
+        assert abs(second - scheduler.RATE_LIMIT_BACKOFF_BASE_SECONDS * 2) < 5
+
+        # A success clears the strike counter.
+        runtime.cooldown_until = 0.0
+        pool.record_success(runtime)
+        assert runtime.rate_limit_strikes == 0
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_pool_auto_probe_recovers_unhealthy_account(tmp_data_dir, config_override):
+    from app.core.kimi_account_pool import KimiAccountPool
+    from app.core.kimi_account_store import KimiAccountConfig
+
+    config_override(KIMI_AUTO_PROBE_INTERVAL=300)
+
+    account = KimiAccountConfig(
+        id="acc-probe",
+        name="Probe",
+        raw_token="refresh-token",
+        enabled=True,
+        max_concurrency=1,
+        min_interval_seconds=0,
+        device_id="1111111111111111111",
+        created_at=1,
+        updated_at=1,
+    )
+    pool = KimiAccountPool([account], base_url="https://kimi.example.test")
+    runtime = pool._runtimes[0]
+
+    refreshed = {"count": 0}
+
+    async def fake_refresh():
+        refreshed["count"] += 1
+        return "new-access-token"
+
+    runtime.token_manager.invalidate_and_retry = fake_refresh  # type: ignore[assignment]
+
+    try:
+        async with pool.acquire(account_id="acc-probe", require_selectable=False) as acquired:
+            pool.record_failure(
+                acquired,
+                KimiAPIError("unauth", upstream_status_code=401, upstream_error_type="unauthorized"),
+            )
+        assert runtime.unhealthy_error
+
+        # Not due yet: mark it as just-probed so the quiet window has not elapsed.
+        runtime.last_probe_at = time.time()
+        assert await pool.auto_probe_unhealthy() == []
+        assert refreshed["count"] == 0
+
+        # Once the quiet window has elapsed the probe refreshes and recovers it.
+        runtime.last_probe_at = time.time() - 400
+        results = await pool.auto_probe_unhealthy()
+        assert results and results[0]["result"] == "recovered"
+        assert refreshed["count"] == 1
+        assert not runtime.unhealthy_error
+        assert pool.account_infos()[0]["token_healthy"] is True
+    finally:
+        await pool.close()

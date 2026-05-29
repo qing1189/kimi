@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 from .config import Config
 from .core.auth import init_auth
-from .core.kimi_account_pool import close_account_pool, init_account_pool
+from .core.kimi_account_pool import close_account_pool, init_account_pool, stop_auto_probe
 from .core.kimi_account_store import kimi_accounts_file_exists, load_kimi_accounts
 from .core.keys import init_key_store
 from .core.kimi_token_store import load_configured_kimi_token
@@ -40,6 +40,7 @@ def initialize_runtime() -> None:
 
 
 async def shutdown_runtime() -> None:
+    await stop_auto_probe()
     await close_account_pool()
     await close_token_manager()
     await close_shared_transports()
