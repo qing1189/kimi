@@ -21,12 +21,22 @@ import {
   TableCell,
 } from "@/components/ui/table"
 import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
   MobileListSkeleton,
   TableSkeleton,
 } from "@/components/shared/PageSkeletons"
 import { Skeleton } from "@/components/ui/skeleton"
+import { LoadingSpinner } from "@/components/shared/LoadingSpinner"
 import {
   Activity,
+  AlertTriangle,
   ArrowDownToLine,
   ArrowUpFromLine,
   BarChart3,
@@ -34,8 +44,13 @@ import {
   Key,
   RotateCcwIcon,
   ShieldCheck,
+  Trash2,
   XCircle,
 } from "lucide-react"
+
+type ResetTarget =
+  | { scope: "all" }
+  | { scope: "group"; group_by: UsageGroupBy; group_id: string; name: string }
 
 function formatNumber(value: number): string {
   return (value ?? 0).toLocaleString("en-US")
@@ -107,9 +122,11 @@ function SummaryCard({
 function UsageMobileCard({
   item,
   groupBy,
+  onReset,
 }: {
   item: UsageStatsItem
   groupBy: UsageGroupBy
+  onReset: (item: UsageStatsItem) => void
 }) {
   return (
     <div className="rounded-lg border border-border/60 bg-card p-4 shadow-sm">
@@ -167,6 +184,18 @@ function UsageMobileCard({
           </p>
         </div>
       </div>
+
+      <div className="mt-3 flex justify-end border-t border-border/60 pt-3">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-8 text-destructive hover:text-destructive"
+          onClick={() => onReset(item)}
+        >
+          <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+          重置
+        </Button>
+      </div>
     </div>
   )
 }
@@ -176,6 +205,8 @@ export default function UsagePage() {
   const [data, setData] = useState<UsageStats | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [resetTarget, setResetTarget] = useState<ResetTarget | null>(null)
+  const [resetting, setResetting] = useState(false)
 
   const fetchUsage = useCallback(async () => {
     try {
@@ -194,6 +225,37 @@ export default function UsagePage() {
     fetchUsage()
   }, [fetchUsage])
 
+  const confirmReset = async () => {
+    if (!resetTarget) return
+    setResetting(true)
+    setError(null)
+    try {
+      const payload =
+        resetTarget.scope === "all"
+          ? { scope: "all" as const }
+          : {
+              scope: "group" as const,
+              group_by: resetTarget.group_by,
+              group_id: resetTarget.group_id,
+            }
+      await api.resetUsage(payload)
+      setResetTarget(null)
+      await fetchUsage()
+    } catch {
+      setError("重置失败")
+    } finally {
+      setResetting(false)
+    }
+  }
+
+  const resetGroup = (item: UsageStatsItem) =>
+    setResetTarget({
+      scope: "group",
+      group_by: groupBy,
+      group_id: item.group_id,
+      name: item.name,
+    })
+
   const totals = data?.totals
   const items = data?.items ?? []
   const groupColumnLabel = groupBy === "kimi_account" ? "Kimi 账号" : "API Key"
@@ -206,7 +268,7 @@ export default function UsagePage() {
           <BarChart3 className="size-4 text-primary" />
           <span>统计维度</span>
         </div>
-        <div className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
+        <div className="flex flex-wrap items-center gap-2">
           <Select
             value={groupBy}
             onValueChange={(v) =>
@@ -229,6 +291,16 @@ export default function UsagePage() {
           >
             <RotateCcwIcon className="mr-1 size-3" />
             刷新
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-10 text-xs text-destructive hover:text-destructive sm:h-8"
+            onClick={() => setResetTarget({ scope: "all" })}
+            disabled={loading || !data || data.items.length === 0}
+          >
+            <Trash2 className="mr-1 size-3" />
+            全部重置
           </Button>
         </div>
       </div>
@@ -286,7 +358,7 @@ export default function UsagePage() {
       {loading ? (
         <>
           <MobileListSkeleton items={4} className="md:hidden" />
-          <TableSkeleton rows={5} columns={8} className="hidden md:block" />
+          <TableSkeleton rows={5} columns={9} className="hidden md:block" />
         </>
       ) : items.length === 0 ? (
         <div className="rounded-lg border border-border/60 bg-card py-16 text-center shadow-sm">
@@ -304,21 +376,23 @@ export default function UsagePage() {
                 key={item.group_id || item.name}
                 item={item}
                 groupBy={groupBy}
+                onReset={resetGroup}
               />
             ))}
           </div>
 
           <Table
             containerClassName="hidden md:block max-h-[620px]"
-            className="min-w-[860px] table-fixed"
+            className="min-w-[920px] table-fixed"
           >
             <colgroup>
-              <col className="w-[22%]" />
+              <col className="w-[18%]" />
+              <col className="w-[9%]" />
+              <col className="w-[9%]" />
+              <col className="w-[9%]" />
+              <col className="w-[9%]" />
               <col className="w-[11%]" />
               <col className="w-[11%]" />
-              <col className="w-[11%]" />
-              <col className="w-[11%]" />
-              <col className="w-[12%]" />
               <col className="w-[12%]" />
               <col className="w-[12%]" />
             </colgroup>
@@ -332,6 +406,7 @@ export default function UsagePage() {
                 <TableHead className="text-right text-xs">输入 tokens</TableHead>
                 <TableHead className="text-right text-xs">输出 tokens</TableHead>
                 <TableHead className="text-right text-xs">合计 tokens</TableHead>
+                <TableHead className="text-right text-xs">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -364,12 +439,75 @@ export default function UsagePage() {
                   <TableCell className="text-right text-xs font-medium tabular-nums">
                     {formatNumber(item.total_tokens)}
                   </TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="text-destructive hover:text-destructive"
+                      title="重置该项统计"
+                      onClick={() => resetGroup(item)}
+                    >
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
         </>
       )}
+
+      <Dialog
+        open={resetTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !resetting) setResetTarget(null)
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-destructive" />
+              {resetTarget?.scope === "all" ? "重置全部用量统计" : "重置用量统计"}
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-2 text-sm text-muted-foreground">
+            {resetTarget?.scope === "group" ? (
+              <p>
+                将重置{" "}
+                <span className="font-medium text-foreground">
+                  {resetTarget.name}
+                </span>{" "}
+                的用量统计。
+              </p>
+            ) : (
+              <p>
+                将重置<span className="font-medium text-foreground">全部</span>
+                用量统计。
+              </p>
+            )}
+            <p className="text-destructive">
+              此操作会删除对应的请求日志记录，统计将归零且不可恢复。
+            </p>
+          </div>
+
+          <DialogFooter>
+            <DialogClose
+              render={<Button variant="outline" disabled={resetting} />}
+            >
+              取消
+            </DialogClose>
+            <Button
+              variant="destructive"
+              onClick={confirmReset}
+              disabled={resetting}
+            >
+              {resetting ? <LoadingSpinner size={16} className="mr-2" /> : null}
+              确认重置
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

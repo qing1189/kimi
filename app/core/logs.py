@@ -727,6 +727,28 @@ def aggregate_usage(group_by: str = "api_key") -> List[Dict[str, Any]]:
     return result
 
 
+def reset_usage(scope: str = "all", group_by: str = "api_key", group_id: str = "") -> int:
+    """Delete the request-log rows that back the usage statistics.
+
+    ``scope='all'`` removes every row; ``scope='group'`` removes only rows for
+    the given API key name (``group_by='api_key'``) or Kimi account id
+    (``group_by='kimi_account'``). ``group_by`` is whitelisted to fixed column
+    names. Returns the number of rows deleted.
+    """
+    with _connect() as conn:
+        if scope == "group":
+            column = "kimi_account_id" if group_by == "kimi_account" else "api_key_name"
+            cursor = conn.execute(
+                f"DELETE FROM request_logs WHERE {column} = ?",
+                (group_id,),
+            )
+        else:
+            cursor = conn.execute("DELETE FROM request_logs")
+        deleted = cursor.rowcount
+        conn.commit()
+    return int(deleted if deleted and deleted > 0 else 0)
+
+
 def get_log(request_id: str) -> Optional[RequestLog]:
     with _connect() as conn:
         row = conn.execute(

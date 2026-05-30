@@ -33,6 +33,7 @@ from .view_models import (
     key_list,
     log_detail,
     log_page,
+    reset_usage_stats,
     token_info,
     usage_stats,
 )
@@ -449,6 +450,22 @@ def create_api_router() -> APIRouter:
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         group_by = request.query_params.get("group_by", "api_key")
         return JSONResponse(usage_stats(group_by))
+
+    @router.post("/usage/reset")
+    async def usage_reset(request: Request):
+        if not verify_session(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        if not verify_csrf(request):
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        scope = body.get("scope", "all")
+        group_by = body.get("group_by", "api_key")
+        group_id = body.get("group_id", "") or ""
+        result = reset_usage_stats(scope=scope, group_by=group_by, group_id=group_id)
+        return JSONResponse({"success": True, **result})
 
     @router.get("/logs")
     async def logs_list(request: Request):

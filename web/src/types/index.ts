@@ -234,6 +234,12 @@ export interface UsageStats {
   tokens_estimated: boolean
 }
 
+export interface UsageResetResponse extends UsageStats {
+  success: boolean
+  deleted: number
+  scope: "all" | "group"
+}
+
 export interface CheckAllAccountResult {
   id: string
   name: string

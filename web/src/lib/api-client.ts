@@ -161,6 +161,16 @@ export const api = {
       `/usage?group_by=${encodeURIComponent(groupBy)}`,
     ),
 
+  resetUsage: (payload: {
+    scope: "all" | "group"
+    group_by?: import("@/types").UsageGroupBy
+    group_id?: string
+  }) =>
+    request<import("@/types").UsageResetResponse>("/usage/reset", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
   checkAllAccounts: () =>
     request<import("@/types").CheckAllResponse>("/tokens/check-all", {
       method: "POST",

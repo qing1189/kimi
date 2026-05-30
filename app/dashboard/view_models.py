@@ -18,6 +18,7 @@ from ..core.logs import (
     count_logs,
     get_log,
     get_recent_logs,
+    reset_usage,
     search_logs,
     total_log_count,
 )
@@ -484,6 +485,20 @@ def usage_stats(group_by: str = "api_key") -> Dict[str, Any]:
         "retention": _dashboard_scan_limit(),
         "tokens_estimated": True,
     }
+
+
+def reset_usage_stats(
+    scope: str = "all",
+    group_by: str = "api_key",
+    group_id: str = "",
+) -> Dict[str, Any]:
+    normalized = "kimi_account" if group_by == "kimi_account" else "api_key"
+    safe_scope = "group" if scope == "group" else "all"
+    deleted = reset_usage(scope=safe_scope, group_by=normalized, group_id=group_id)
+    result = usage_stats(normalized)
+    result["deleted"] = deleted
+    result["scope"] = safe_scope
+    return result
 
 
 def dashboard_stats() -> Dict[str, Any]:
