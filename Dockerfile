@@ -10,6 +10,11 @@ RUN pip install --no-cache-dir uv
 
 WORKDIR /app
 
+# Force uv to copy package files into the venv instead of cloning/hardlinking
+# from its cache. Some Docker build filesystems don't support reflink/hardlink
+# and fail with "Resource temporarily unavailable (os error 11)".
+ENV UV_LINK_MODE=copy
+
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project --compile-bytecode
 
