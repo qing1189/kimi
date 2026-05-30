@@ -155,4 +155,14 @@ export const api = {
 
   getLogDetail: (requestId: string) =>
     request<import("@/types").LogDetailData>(`/logs/${requestId}`),
+
+  getUsage: (groupBy: import("@/types").UsageGroupBy) =>
+    request<import("@/types").UsageStats>(
+      `/usage?group_by=${encodeURIComponent(groupBy)}`,
+    ),
+
+  checkAllAccounts: () =>
+    request<import("@/types").CheckAllResponse>("/tokens/check-all", {
+      method: "POST",
+    }),
 }

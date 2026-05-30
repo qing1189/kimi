@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react"
 import {
   CheckCircle2,
   CircleAlert,
+  ListChecks,
   Pencil,
   Plus,
   RefreshCw,
@@ -11,6 +12,7 @@ import {
 
 import { api } from "@/lib/api-client"
 import type {
+  CheckAllResponse,
   KimiAccountInfo,
   KimiAccountsSummary,
   KimiAccountSaveResult,
@@ -134,6 +136,12 @@ export default function TokenPage() {
   const [validation, setValidation] = useState<ValidationDialogState | null>(null)
   const [accountPage, setAccountPage] = useState(1)
 
+  const [checkingAll, setCheckingAll] = useState(false)
+  const [checkAllOpen, setCheckAllOpen] = useState(false)
+  const [checkAllResult, setCheckAllResult] = useState<CheckAllResponse | null>(
+    null,
+  )
+
   const applyAccounts = (result: {
     accounts: KimiAccountInfo[]
     summary: KimiAccountsSummary
@@ -243,6 +251,23 @@ export default function TokenPage() {
     }
   }
 
+  const handleCheckAll = async () => {
+    setCheckingAll(true)
+    setRefreshError(null)
+    setRefreshSuccess(null)
+    try {
+      const result = await api.checkAllAccounts()
+      applyAccounts(result)
+      setCheckAllResult(result)
+      setCheckAllOpen(true)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "检测失败"
+      setRefreshError(msg)
+    } finally {
+      setCheckingAll(false)
+    }
+  }
+
   const handleDelete = async (account: KimiAccountInfo) => {
     setBusyAccount(account.id)
     setRefreshError(null)
@@ -290,7 +315,22 @@ export default function TokenPage() {
         <CardHeader className="pb-3">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <CardTitle className="text-sm font-medium">账号池</CardTitle>
-            <Dialog open={editOpen} onOpenChange={setEditOpen}>
+            <div className="grid grid-cols-1 gap-2 sm:flex sm:items-center">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-10 w-full sm:h-7 sm:w-auto"
+                onClick={handleCheckAll}
+                disabled={checkingAll || accounts.length === 0}
+              >
+                {checkingAll ? (
+                  <LoadingSpinner size={14} className="mr-1.5" />
+                ) : (
+                  <ListChecks className="mr-1.5 h-3.5 w-3.5" />
+                )}
+                一键检测所有账号
+              </Button>
+              <Dialog open={editOpen} onOpenChange={setEditOpen}>
               <DialogTrigger
                 render={
                   <Button
@@ -410,6 +450,7 @@ export default function TokenPage() {
                 </DialogFooter>
               </DialogContent>
             </Dialog>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -603,6 +644,70 @@ export default function TokenPage() {
                     </pre>
                   </div>
                 )}
+            </div>
+          )}
+
+          <DialogFooter>
+            <DialogClose render={<Button variant="outline" />}>
+              关闭
+            </DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={checkAllOpen} onOpenChange={setCheckAllOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ListChecks className="h-4 w-4 text-primary" />
+              检测结果
+            </DialogTitle>
+          </DialogHeader>
+
+          {checkAllResult && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-3 gap-2">
+                {metric("检测账号", checkAllResult.checked)}
+                {metric("有效", checkAllResult.valid_count)}
+                {metric("无效", checkAllResult.invalid_count)}
+              </div>
+
+              {checkAllResult.results.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
+                  暂无可检测的账号
+                </div>
+              ) : (
+                <div className="max-h-80 space-y-2 overflow-auto">
+                  {checkAllResult.results.map((item) => (
+                    <div
+                      key={item.id}
+                      className="flex items-start justify-between gap-3 rounded-lg border border-border/60 bg-muted/25 px-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium" title={item.name}>
+                          {item.name}
+                        </p>
+                        {!item.valid && item.error && (
+                          <p className="mt-0.5 truncate text-[11px] text-destructive">
+                            {item.error}
+                          </p>
+                        )}
+                      </div>
+                      <Badge
+                        variant={item.valid ? "default" : "destructive"}
+                        className="shrink-0 text-[10px]"
+                      >
+                        {item.valid ? (
+                          <CheckCircle2 className="mr-1 h-3 w-3" />
+                        ) : (
+                          <CircleAlert className="mr-1 h-3 w-3" />
+                        )}
+                        {item.valid ? "有效" : "无效"}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 

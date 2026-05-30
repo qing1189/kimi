@@ -62,6 +62,8 @@ class RequestLog:
     upstream_retry_after: float = 0.0
     kimi_account_id: str = ""
     kimi_account_name: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 def _db_path() -> str:
@@ -108,7 +110,9 @@ def _init_db(conn: sqlite3.Connection) -> None:
             upstream_error_type TEXT NOT NULL DEFAULT '',
             upstream_retry_after REAL NOT NULL DEFAULT 0,
             kimi_account_id TEXT NOT NULL DEFAULT '',
-            kimi_account_name TEXT NOT NULL DEFAULT ''
+            kimi_account_name TEXT NOT NULL DEFAULT '',
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0
         )
         """
     )
@@ -117,6 +121,8 @@ def _init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "upstream_retry_after", "REAL NOT NULL DEFAULT 0")
     _ensure_column(conn, "kimi_account_id", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "kimi_account_name", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "input_tokens", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "output_tokens", "INTEGER NOT NULL DEFAULT 0")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_timestamp ON request_logs(timestamp DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_status ON request_logs(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model)")
@@ -337,6 +343,78 @@ def _parse_stream_body(raw_body: str) -> Tuple[str, str]:
     return "".join(content_parts), "".join(reasoning_parts)
 
 
+def estimate_tokens(text: str) -> int:
+    """Approximate the token count for a piece of text.
+
+    The Kimi upstream does not report token usage, so usage statistics rely on
+    a heuristic rather than an exact tokenizer: CJK characters (Chinese,
+    Japanese, Korean) are counted as roughly one token each, while other
+    characters are approximated at about four characters per token. The result
+    is an estimate, not an authoritative usage figure.
+    """
+    if not text:
+        return 0
+
+    cjk = 0
+    other = 0
+    for ch in text:
+        if (
+            "\u4e00" <= ch <= "\u9fff"  # CJK Unified Ideographs
+            or "\u3400" <= ch <= "\u4dbf"  # CJK Extension A
+            or "\u3040" <= ch <= "\u30ff"  # Hiragana + Katakana
+            or "\uac00" <= ch <= "\ud7a3"  # Hangul syllables
+            or "\uf900" <= ch <= "\ufaff"  # CJK Compatibility Ideographs
+            or "\uff00" <= ch <= "\uffef"  # Full-width forms
+        ):
+            cjk += 1
+        else:
+            other += 1
+
+    return cjk + (other + 3) // 4
+
+
+def _request_input_text(request_body: str) -> str:
+    """Extract the prompt text from an OpenAI-compatible request body.
+
+    Handles chat ``messages``, completion ``prompt`` and Responses-API
+    ``input`` shapes so input tokens can be estimated consistently.
+    """
+    if not request_body:
+        return ""
+    try:
+        data = json.loads(request_body)
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+
+    parts: List[str] = []
+
+    messages = data.get("messages")
+    if isinstance(messages, list):
+        for message in messages:
+            if isinstance(message, dict):
+                parts.append(_response_text(message.get("content")))
+
+    prompt = data.get("prompt")
+    if isinstance(prompt, str):
+        parts.append(prompt)
+    elif isinstance(prompt, list):
+        parts.append("".join(str(item) for item in prompt))
+
+    input_value = data.get("input")
+    if isinstance(input_value, str):
+        parts.append(input_value)
+    elif isinstance(input_value, list):
+        for item in input_value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(_response_text(item.get("content")))
+
+    return "".join(part for part in parts if part)
+
+
 def _prepare_entry(entry: RequestLog) -> RequestLog:
     limit = int(getattr(Config, "REQUEST_LOG_BODY_LIMIT", 1048576))
     request_body, request_truncated = _sanitize_body(entry.request_body, limit)
@@ -353,6 +431,11 @@ def _prepare_entry(entry: RequestLog) -> RequestLog:
         parsed_text = parsed_text or body_text
         parsed_reasoning = parsed_reasoning or body_reasoning
 
+    input_tokens = entry.input_tokens or estimate_tokens(_request_input_text(entry.request_body))
+    output_tokens = entry.output_tokens or estimate_tokens(
+        f"{parsed_text}{parsed_reasoning}"
+    )
+
     return replace(
         entry,
         request_id=entry.request_id or uuid.uuid4().hex,
@@ -365,6 +448,8 @@ def _prepare_entry(entry: RequestLog) -> RequestLog:
         raw_stream_body="",
         parsed_response_text=parsed_text,
         parsed_reasoning_content=parsed_reasoning,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )
 
 
@@ -400,9 +485,10 @@ def log_request(entry: RequestLog) -> None:
                     response_headers, response_body, response_body_truncated,
                     raw_stream_body, parsed_response_text, parsed_reasoning_content,
                     error_message, upstream_status_code, upstream_error_type,
-                    upstream_retry_after, kimi_account_id, kimi_account_name
+                    upstream_retry_after, kimi_account_id, kimi_account_name,
+                    input_tokens, output_tokens
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry.request_id,
@@ -433,6 +519,8 @@ def log_request(entry: RequestLog) -> None:
                     float(entry.upstream_retry_after or 0.0),
                     entry.kimi_account_id,
                     entry.kimi_account_name,
+                    int(entry.input_tokens or 0),
+                    int(entry.output_tokens or 0),
                 ),
             )
             _trim_logs(conn)
@@ -471,6 +559,8 @@ def _row_to_entry(row: sqlite3.Row) -> RequestLog:
         upstream_retry_after=row["upstream_retry_after"],
         kimi_account_id=row["kimi_account_id"],
         kimi_account_name=row["kimi_account_name"],
+        input_tokens=row["input_tokens"],
+        output_tokens=row["output_tokens"],
     )
 
 
@@ -590,6 +680,51 @@ def _log_query_parts(
 
 def get_recent_logs(limit: int = 100) -> List[RequestLog]:
     return search_logs(limit=limit)
+
+
+def aggregate_usage(group_by: str = "api_key") -> List[Dict[str, Any]]:
+    """Aggregate request/token usage grouped by API key or Kimi account.
+
+    ``group_by`` is whitelisted to fixed column names to keep the query safe.
+    Returns one row per group with total/success/failed request counts and the
+    (estimated) input/output token sums.
+    """
+    if group_by == "kimi_account":
+        id_column = "kimi_account_id"
+        name_column = "kimi_account_name"
+    else:
+        id_column = "api_key_name"
+        name_column = "api_key_name"
+
+    sql = f"""
+        SELECT
+            {id_column} AS group_id,
+            MAX({name_column}) AS group_name,
+            COUNT(*) AS total_requests,
+            SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_requests,
+            SUM(CASE WHEN status != 'success' THEN 1 ELSE 0 END) AS failed_requests,
+            COALESCE(SUM(input_tokens), 0) AS input_tokens,
+            COALESCE(SUM(output_tokens), 0) AS output_tokens
+        FROM request_logs
+        GROUP BY {id_column}
+        ORDER BY total_requests DESC, group_id ASC
+    """
+
+    with _connect() as conn:
+        rows = conn.execute(sql).fetchall()
+
+    result: List[Dict[str, Any]] = []
+    for row in rows:
+        result.append({
+            "group_id": row["group_id"] or "",
+            "group_name": row["group_name"] or "",
+            "total_requests": int(row["total_requests"] or 0),
+            "success_requests": int(row["success_requests"] or 0),
+            "failed_requests": int(row["failed_requests"] or 0),
+            "input_tokens": int(row["input_tokens"] or 0),
+            "output_tokens": int(row["output_tokens"] or 0),
+        })
+    return result
 
 
 def get_log(request_id: str) -> Optional[RequestLog]:

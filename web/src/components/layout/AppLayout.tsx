@@ -4,6 +4,7 @@ import {
   Key,
   ShieldCheck,
   ClipboardList,
+  BarChart3,
   LogOut,
   ChevronDown,
   User,
@@ -24,6 +25,7 @@ const navItems = [
   { to: "/admin/token", label: "账号管理", icon: ShieldCheck },
   { to: "/admin/keys", label: "API Keys", icon: Key },
   { to: "/admin/logs", label: "请求日志", icon: ClipboardList },
+  { to: "/admin/usage", label: "用量统计", icon: BarChart3 },
 ]
 
 const pageTitles: Record<string, string> = {
@@ -31,6 +33,7 @@ const pageTitles: Record<string, string> = {
   "/admin/token": "账号管理",
   "/admin/keys": "API Keys",
   "/admin/logs": "请求日志",
+  "/admin/usage": "用量统计",
 }
 
 function GitHubMark(props: SVGProps<SVGSVGElement>) {
@@ -251,7 +254,7 @@ export default function AppLayout() {
         aria-label="移动端导航"
         className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/95 px-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] pt-2 shadow-[0_-10px_30px_rgba(0,0,0,0.08)] backdrop-blur md:hidden"
       >
-        <div className="grid grid-cols-4 gap-1">
+        <div className="grid grid-cols-5 gap-1">
           {navItems.map((item) => (
             <NavLink
               key={item.to}

@@ -202,6 +202,53 @@ export interface LogDetailData {
   parsed_reasoning_content: string
 }
 
+export type UsageGroupBy = "api_key" | "kimi_account"
+
+export interface UsageStatsItem {
+  group_id: string
+  name: string
+  total_requests: number
+  success_requests: number
+  failed_requests: number
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  success_rate: number
+}
+
+export interface UsageStatsTotals {
+  total_requests: number
+  success_requests: number
+  failed_requests: number
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  success_rate: number
+}
+
+export interface UsageStats {
+  group_by: UsageGroupBy
+  items: UsageStatsItem[]
+  totals: UsageStatsTotals
+  retention: number
+  tokens_estimated: boolean
+}
+
+export interface CheckAllAccountResult {
+  id: string
+  name: string
+  valid: boolean
+  error: string
+}
+
+export interface CheckAllResponse extends KimiAccountsResponse {
+  success: boolean
+  checked: number
+  valid_count: number
+  invalid_count: number
+  results: CheckAllAccountResult[]
+}
+
 export interface ApiError {
   error: string
   success?: boolean

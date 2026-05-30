@@ -14,6 +14,7 @@ from ..core.kimi_account_pool import get_account_pool
 from ..core.keys import list_keys, total_request_count
 from ..core.logs import (
     RequestLog,
+    aggregate_usage,
     count_logs,
     get_log,
     get_recent_logs,
@@ -427,6 +428,61 @@ def log_detail(request_id: str, base_url: str) -> Optional[Dict[str, Any]]:
         "raw_stream_body": log.raw_stream_body,
         "parsed_response_text": log.parsed_response_text,
         "parsed_reasoning_content": log.parsed_reasoning_content,
+    }
+
+
+def _usage_group_label(group_by: str, group_id: str, group_name: str) -> str:
+    name = group_name or group_id
+    if name:
+        return name
+    return "未关联账号" if group_by == "kimi_account" else "匿名 / 未知 Key"
+
+
+def usage_stats(group_by: str = "api_key") -> Dict[str, Any]:
+    normalized = "kimi_account" if group_by == "kimi_account" else "api_key"
+    rows = aggregate_usage(normalized)
+
+    items: List[Dict[str, Any]] = []
+    totals = {
+        "total_requests": 0,
+        "success_requests": 0,
+        "failed_requests": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+    }
+
+    for row in rows:
+        total = row["total_requests"]
+        success = row["success_requests"]
+        input_tokens = row["input_tokens"]
+        output_tokens = row["output_tokens"]
+        items.append({
+            "group_id": row["group_id"],
+            "name": _usage_group_label(normalized, row["group_id"], row["group_name"]),
+            "total_requests": total,
+            "success_requests": success,
+            "failed_requests": row["failed_requests"],
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "success_rate": round((success / total) * 100, 1) if total else 0.0,
+        })
+        for key in totals:
+            totals[key] += row[key]
+
+    totals["total_tokens"] = totals["input_tokens"] + totals["output_tokens"]
+    totals["success_rate"] = (
+        round((totals["success_requests"] / totals["total_requests"]) * 100, 1)
+        if totals["total_requests"]
+        else 0.0
+    )
+
+    return {
+        "group_by": normalized,
+        "items": items,
+        "totals": totals,
+        "retention": _dashboard_scan_limit(),
+        "tokens_estimated": True,
     }
 
 

@@ -1,3 +1,5 @@
+from typing import Any, Dict
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
@@ -25,7 +27,15 @@ from ..core.kimi_token_store import save_kimi_token
 from ..core.token_manager import get_token_manager, replace_token_manager
 from ..kimi.protocol import KIMI_SUBSCRIPTION_PATH, KimiAPIError
 from ..kimi.transport import build_kimi_headers
-from .view_models import accounts_info, dashboard_stats, key_list, log_detail, log_page, token_info
+from .view_models import (
+    accounts_info,
+    dashboard_stats,
+    key_list,
+    log_detail,
+    log_page,
+    token_info,
+    usage_stats,
+)
 
 
 def _account_result(account_id: str):
@@ -37,6 +47,65 @@ def _account_result(account_id: str):
 
 async def _reload_account_pool():
     return await replace_account_pool(load_kimi_accounts())
+
+
+async def _validate_account(pool, account_id: str) -> Dict[str, Any]:
+    """Validate a single Kimi account against the subscription endpoint.
+
+    Shared by the per-account validate endpoint and the bulk "check all"
+    endpoint. Records success/failure on the pool and never raises.
+    """
+    subscription: Any = None
+    valid = False
+    runtime = None
+    try:
+        async with pool.acquire(
+            account_id=account_id,
+            require_selectable=False,
+        ) as runtime:
+            token = await runtime.token_manager.get_access_token()
+            headers = build_kimi_headers(
+                base_url=runtime.transport.base_url,
+                token=token,
+                device_id=runtime.account.device_id,
+                session_id=runtime.session_id,
+            )
+            response = await runtime.transport.request(
+                "POST",
+                KIMI_SUBSCRIPTION_PATH,
+                json={},
+                headers=headers,
+                timeout=15.0,
+            )
+            valid = response.status_code == 200
+            subscription = response.json() if valid else {"status_code": response.status_code}
+            if valid:
+                pool.record_success(runtime)
+            else:
+                pool.record_failure(
+                    runtime,
+                    KimiAPIError(
+                        f"Kimi token validation failed with status {response.status_code}",
+                        upstream_status_code=response.status_code,
+                        upstream_error_type="token_validation_failed",
+                    ),
+                )
+    except Exception as exc:
+        if runtime is not None:
+            pool.record_failure(runtime, exc)
+        subscription = {"error": str(exc)}
+        valid = False
+    return {"valid": valid, "subscription": subscription or {}}
+
+
+def _validation_error_text(subscription: Dict[str, Any]) -> str:
+    if not isinstance(subscription, dict):
+        return "验证失败"
+    if subscription.get("error"):
+        return str(subscription["error"])
+    if subscription.get("status_code"):
+        return f"HTTP {subscription['status_code']}"
+    return "验证失败"
 
 
 def create_api_router() -> APIRouter:
@@ -303,49 +372,43 @@ def create_api_router() -> APIRouter:
         pool = get_account_pool(required=False)
         if pool is None:
             pool = await _reload_account_pool()
-        subscription = None
-        valid = False
-        try:
-            async with pool.acquire(
-                account_id=account_id,
-                require_selectable=False,
-            ) as runtime:
-                token = await runtime.token_manager.get_access_token()
-                headers = build_kimi_headers(
-                    base_url=runtime.transport.base_url,
-                    token=token,
-                    device_id=runtime.account.device_id,
-                    session_id=runtime.session_id,
-                )
-                response = await runtime.transport.request(
-                    "POST",
-                    KIMI_SUBSCRIPTION_PATH,
-                    json={},
-                    headers=headers,
-                    timeout=15.0,
-                )
-                valid = response.status_code == 200
-                subscription = response.json() if valid else {"status_code": response.status_code}
-                if valid:
-                    pool.record_success(runtime)
-                else:
-                    pool.record_failure(
-                        runtime,
-                        KimiAPIError(
-                            f"Kimi token validation failed with status {response.status_code}",
-                            upstream_status_code=response.status_code,
-                            upstream_error_type="token_validation_failed",
-                        ),
-                    )
-        except Exception as exc:
-            if "runtime" in locals():
-                pool.record_failure(runtime, exc)
-            subscription = {"error": str(exc)}
-            valid = False
+        result = await _validate_account(pool, account_id)
         return JSONResponse({
-            "valid": valid,
-            "subscription": subscription or {},
+            "valid": result["valid"],
+            "subscription": result["subscription"],
             "account": _account_result(account_id),
+        })
+
+    @router.post("/tokens/check-all")
+    async def tokens_check_all(request: Request):
+        if not verify_session(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        if not verify_csrf(request):
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+        pool = get_account_pool(required=False)
+        if pool is None:
+            pool = await _reload_account_pool()
+
+        accounts = accounts_info()["accounts"]
+        results = []
+        for account in accounts:
+            outcome = await _validate_account(pool, account["id"])
+            results.append({
+                "id": account["id"],
+                "name": account["name"],
+                "valid": outcome["valid"],
+                "error": "" if outcome["valid"] else _validation_error_text(outcome["subscription"]),
+            })
+
+        valid_count = sum(1 for item in results if item["valid"])
+        return JSONResponse({
+            "success": True,
+            "checked": len(results),
+            "valid_count": valid_count,
+            "invalid_count": len(results) - valid_count,
+            "results": results,
+            **accounts_info(),
         })
 
     @router.get("/keys")
@@ -379,6 +442,13 @@ def create_api_router() -> APIRouter:
             return JSONResponse({"error": "Forbidden"}, status_code=403)
         delete_key(key)
         return JSONResponse({"keys": key_list(), "deleted": True})
+
+    @router.get("/usage")
+    async def usage_get(request: Request):
+        if not verify_session(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        group_by = request.query_params.get("group_by", "api_key")
+        return JSONResponse(usage_stats(group_by))
 
     @router.get("/logs")
     async def logs_list(request: Request):

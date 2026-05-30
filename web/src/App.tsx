@@ -6,6 +6,7 @@ import TokenPage from "@/pages/TokenPage"
 import KeysPage from "@/pages/KeysPage"
 import LogsPage from "@/pages/LogsPage"
 import LogDetailPage from "@/pages/LogDetailPage"
+import UsagePage from "@/pages/UsagePage"
 
 function NotFoundPage() {
   return (
@@ -31,6 +32,7 @@ const router = createBrowserRouter([
       { path: "keys", element: <KeysPage /> },
       { path: "logs", element: <LogsPage /> },
       { path: "logs/:requestId", element: <LogDetailPage /> },
+      { path: "usage", element: <UsagePage /> },
     ],
   },
   { path: "*", element: <NotFoundPage /> },
