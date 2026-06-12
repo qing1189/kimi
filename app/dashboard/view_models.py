@@ -187,7 +187,7 @@ def key_list() -> List[Dict[str, Any]]:
     for k in list_keys():
         result.append({
             "key": k.key,
-            "key_preview": k.key[:10] + "..." + k.key[-4:],
+            "key_preview": k.key,
             "name": k.name,
             "created_at_str": fmt_time(k.created_at),
             "last_used_str": fmt_time(k.last_used) if k.last_used > 0 else "从未使用",

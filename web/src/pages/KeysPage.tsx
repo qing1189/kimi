@@ -44,7 +44,7 @@ function KeyMobileCard({
             <p className="truncate text-sm font-medium">{item.name || "-"}</p>
           </div>
           <code className="mt-2 block truncate text-xs text-muted-foreground">
-            {item.key_preview}
+            {item.key}
           </code>
         </div>
         <CopyButton text={item.key} className="size-9 shrink-0" />
@@ -83,6 +83,7 @@ export default function KeysPage() {
   const [loading, setLoading] = useState(true)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [keyName, setKeyName] = useState("")
+  const [customKey, setCustomKey] = useState("")
   const [creating, setCreating] = useState(false)
   const [newKey, setNewKey] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -108,13 +109,17 @@ export default function KeysPage() {
     try {
       setCreating(true)
       setError(null)
-      const data = await api.createKey(keyName.trim() || undefined)
+      const data = await api.createKey(
+        keyName.trim() || undefined,
+        customKey.trim() || undefined,
+      )
       setKeys(data.keys)
       setKeyPage(Math.max(Math.ceil(data.keys.length / KEYS_PAGE_SIZE), 1))
       if (data.new_key) {
         setNewKey(data.new_key)
       }
       setKeyName("")
+      setCustomKey("")
       setDialogOpen(false)
     } catch (err) {
       if (err instanceof ApiClientError) {
@@ -192,18 +197,33 @@ export default function KeysPage() {
           <DialogHeader>
             <DialogTitle>创建新 Key</DialogTitle>
           </DialogHeader>
-          <div className="py-2">
-            <label className="mb-1.5 block text-xs text-muted-foreground">
-              名称（可选）
-            </label>
-            <Input
-              placeholder="输入 Key 名称"
-              value={keyName}
-              onChange={(e) => setKeyName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleCreate()
-              }}
-            />
+          <div className="space-y-4 py-2">
+            <div>
+              <label className="mb-1.5 block text-xs text-muted-foreground">
+                名称（可选）
+              </label>
+              <Input
+                placeholder="输入 Key 名称"
+                value={keyName}
+                onChange={(e) => setKeyName(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-xs text-muted-foreground">
+                自定义 Key（可选，留空则自动生成）
+              </label>
+              <Input
+                placeholder="输入自定义 Key，支持任意字符和长度"
+                value={customKey}
+                onChange={(e) => setCustomKey(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleCreate()
+                }}
+              />
+              <p className="mt-1 text-[11px] text-muted-foreground/70">
+                可自定义任意格式的 Key，不限长度；留空将自动生成 sk-xxx 格式
+              </p>
+            </div>
           </div>
           <DialogFooter>
             <Button
@@ -278,7 +298,7 @@ export default function KeysPage() {
                   <TableCell>
                     <div className="flex min-w-0 items-center gap-2">
                       <code className="inline-flex min-w-0 max-w-full items-center rounded-md border border-border/60 bg-muted/25 px-2.5 py-1 font-mono text-[11px] text-muted-foreground shadow-inner shadow-background/30">
-                        <span className="truncate">{item.key_preview}</span>
+                        <span className="truncate">{item.key}</span>
                       </code>
                       <CopyButton text={item.key} />
                     </div>

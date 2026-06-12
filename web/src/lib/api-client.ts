@@ -133,10 +133,10 @@ export const api = {
 
   getKeys: () => request<import("@/types").KeysResponse>("/keys"),
 
-  createKey: (name?: string) =>
+  createKey: (name?: string, key?: string) =>
     request<import("@/types").KeysResponse>("/keys", {
       method: "POST",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, key }),
     }),
 
   deleteKey: (key: string) =>

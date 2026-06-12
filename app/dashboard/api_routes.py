@@ -426,13 +426,15 @@ def create_api_router() -> APIRouter:
             return JSONResponse({"error": "Forbidden"}, status_code=403)
 
         name = None
+        custom_key = None
         try:
             body = await request.json()
             name = body.get("name") or None
+            custom_key = body.get("key") or None
         except Exception:
             pass
 
-        new = create_key(name)
+        new = create_key(name, custom_key=custom_key)
         return JSONResponse({"keys": key_list(), "new_key": new.key})
 
     @router.delete("/keys/{key:path}")

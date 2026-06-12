@@ -87,13 +87,16 @@ def _next_auto_name() -> str:
     return name
 
 
-def create_key(name: Optional[str] = None) -> ApiKey:
-    raw = os.urandom(16).hex()
-    key_str = f"sk-{raw}"
+def create_key(name: Optional[str] = None, custom_key: Optional[str] = None) -> ApiKey:
+    if custom_key and custom_key.strip():
+        key_str = custom_key.strip()
+    else:
+        raw = os.urandom(16).hex()
+        key_str = f"sk-{raw}"
     if not name:
         name = _next_auto_name()
     else:
-        name = name.strip()[:64]
+        name = name.strip()
     api_key = ApiKey(
         key=key_str,
         name=name,
