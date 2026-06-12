@@ -161,6 +161,12 @@ def _wrap_urls(text: str) -> str:
 
 
 def _format_messages(messages: List[Message]) -> str:
+    """Format messages into a single text payload for the Kimi backend.
+
+    Tool calls and tool results are serialized using DSML format for
+    consistency with the prompt-level tool calling approach. This ensures
+    the model sees the same format in both injected context and history.
+    """
     system_lines: List[str] = []
     body_lines: List[str] = []
 
@@ -169,19 +175,26 @@ def _format_messages(messages: List[Message]) -> str:
         text = message.text_content().strip()
 
         if role == "assistant" and message.tool_calls:
-            tool_calls_text = "\n".join(
-                (
-                    f"[call:{call.get('function', {}).get('name', '')}]"
-                    f"{call.get('function', {}).get('arguments', '')}[/call]"
-                )
-                for call in message.tool_calls
-            ).strip()
-            if tool_calls_text:
-                text = f"[function_calls]\n{tool_calls_text}\n[/function_calls]"
+            # Serialize tool calls in DSML format for consistency with the
+            # prompt-level tool calling approach. This way the model sees the
+            # same DSML format in history as what it's expected to produce.
+            from ..api.toolcall import serialize_assistant_tool_calls
+            dsml_block = serialize_assistant_tool_calls(message.tool_calls)
+            if dsml_block:
+                text = f"{text}\n{dsml_block}" if text else dsml_block
 
         if role == "tool" and message.tool_call_id:
+            # Convert tool results to DSML tool_result format
+            from ..api.toolcall import serialize_tool_result, _escape_attr, _escape_cdata
+            tool_id = message.tool_call_id or ""
+            name = message.name or ""
+            content = text
+            name_attr = f' name="{_escape_attr(name)}"' if name else ""
+            text = (
+                f'<|DSML|tool_result tool_use_id="{_escape_attr(tool_id)}"{name_attr}>'
+                f"<![CDATA[{_escape_cdata(content)}]]></|DSML|tool_result>"
+            )
             role = "user"
-            text = f"[TOOL_RESULT for {message.tool_call_id}] {text}".strip()
 
         if not text:
             continue

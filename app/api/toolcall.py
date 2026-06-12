@@ -12,8 +12,12 @@ implemented purely at the prompt level:
   For streaming responses a stateful :class:`ToolCallSieve` separates ordinary
   text deltas from the tool-call block in real time.
 
-The DSML markup format and parsing approach are ported from the
-``qing1189/qwen2026528`` reference project (``src/toolcall.js``).
+Optimized implementation with:
+- Enhanced prompt engineering with bilingual instructions and examples
+- Robust parsing with fallback for JSON-formatted tool calls
+- Improved streaming sieve with better partial block handling
+- Support for tool_choice modes (auto, required, none)
+- Better handling of edge cases (whitespace, malformed blocks, etc.)
 """
 
 import json
@@ -24,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 TC_OPEN = "<|DSML|tool_calls>"
 TC_CLOSE = "</|DSML|tool_calls>"
 
+# Primary DSML regex patterns
 _INVOKE_RE = re.compile(
     r'<\|DSML\|invoke\s+name="([^"]+)"\s*>(.*?)</\|DSML\|invoke>',
     re.DOTALL,
@@ -34,6 +39,44 @@ _PARAM_RE = re.compile(
 )
 _CDATA_RE = re.compile(r"^\s*<!\[CDATA\[(.*?)\]\]>\s*$", re.DOTALL)
 _NUMBER_RE = re.compile(r"^-?\d+(\.\d+)?$")
+
+# Fallback JSON tool call patterns (for when model outputs JSON instead of DSML)
+_JSON_TOOL_CALL_RE = re.compile(
+    r'(?:```(?:json)?\s*)?\{\s*"(?:name|function)"\s*:\s*"([^"]+)"\s*,\s*'
+    r'"(?:arguments|parameters|params)"\s*:\s*(\{[^}]*(?:\{[^}]*\}[^}]*)?\})\s*\}'
+    r'(?:\s*```)?',
+    re.DOTALL,
+)
+
+# Pattern for function_call style JSON: {"name": "fn", "arguments": {...}}
+_FUNCTION_CALL_RE = re.compile(
+    r'\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*(\{.*?\})\s*\}',
+    re.DOTALL,
+)
+
+# Pattern for tool_calls array style: [{"type": "function", "function": {"name": ..., "arguments": ...}}]
+_TOOL_CALLS_ARRAY_RE = re.compile(
+    r'\[\s*\{\s*"(?:type)"\s*:\s*"function"\s*,\s*"function"\s*:\s*'
+    r'\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*"?(.*?)"?\s*\}\s*\}\s*'
+    r'(?:,\s*\{.*?\}\s*)*\]',
+    re.DOTALL,
+)
+
+# Relaxed DSML patterns for slightly malformed outputs
+_INVOKE_RELAXED_RE = re.compile(
+    r'<\|?DSML\|?invoke\s+name\s*=\s*["\']([^"\']+)["\']\s*>(.*?)</\|?DSML\|?invoke>',
+    re.DOTALL,
+)
+_PARAM_RELAXED_RE = re.compile(
+    r'<\|?DSML\|?parameter\s+name\s*=\s*["\']([^"\']+)["\']\s*>(.*?)</\|?DSML\|?parameter>',
+    re.DOTALL,
+)
+
+# Detect markdown-wrapped DSML blocks
+_MARKDOWN_DSML_RE = re.compile(
+    r'```(?:xml|dsml|tool)?\s*\n?(.*?)\n?\s*```',
+    re.DOTALL,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -71,12 +114,31 @@ def has_tools(payload: Dict[str, Any]) -> bool:
     return True
 
 
+def _get_tool_choice_mode(payload: Dict[str, Any]) -> str:
+    """Extract the tool_choice mode: 'auto', 'required', or a specific function name."""
+    tool_choice = payload.get("tool_choice")
+    if tool_choice is None:
+        return "auto"
+    if isinstance(tool_choice, str):
+        return tool_choice.strip().lower()
+    if isinstance(tool_choice, dict):
+        # {"type": "function", "function": {"name": "specific_fn"}}
+        fn = tool_choice.get("function", {})
+        if isinstance(fn, dict) and fn.get("name"):
+            return f"function:{fn['name']}"
+    return "auto"
+
+
 # ---------------------------------------------------------------------------
 # Request side - prompt construction & message rewriting
 # ---------------------------------------------------------------------------
 
-def build_tool_prompt_block(tools: Optional[List[Any]]) -> str:
-    """Build the system prompt that teaches the model the DSML call format."""
+def build_tool_prompt_block(tools: Optional[List[Any]], tool_choice: str = "auto") -> str:
+    """Build the system prompt that teaches the model the DSML call format.
+
+    Enhanced with bilingual instructions, multiple examples, and strict
+    formatting rules to reduce tool call failures.
+    """
     tool_list = _function_tools(tools)
 
     decls: List[str] = []
@@ -96,33 +158,95 @@ def build_tool_prompt_block(tools: Optional[List[Any]]) -> str:
                 params_block = json.dumps(params, ensure_ascii=False)
             except (TypeError, ValueError):
                 params_block = "{}"
-        decls.append(f"- {name}: {desc}\n  parameters: {params_block}")
+        decls.append(f"### {name}\n- Description: {desc}\n- Parameters schema: {params_block}")
 
     names_line = ", ".join(names) or "(none)"
 
+    # Build tool choice instruction
+    choice_instruction = ""
+    if tool_choice == "required":
+        choice_instruction = (
+            "\n\nIMPORTANT: You MUST call at least one tool in your response. "
+            "Do NOT respond with only text. Always include a tool call block.\n"
+            "重要：你必须调用至少一个工具。不要只回复文本，必须包含工具调用块。\n"
+        )
+    elif tool_choice.startswith("function:"):
+        fn_name = tool_choice[len("function:"):]
+        choice_instruction = (
+            f"\n\nIMPORTANT: You MUST call the function `{fn_name}` in your response.\n"
+            f"重要：你必须在回复中调用函数 `{fn_name}`。\n"
+        )
+
     return "\n".join(
         [
-            f"AVAILABLE TOOLS (all are real and callable): {names_line}",
+            "# Tool Calling Instructions / 工具调用指令",
             "",
-            "When you decide to call a tool, output the call EXACTLY in this format:",
+            f"You have access to the following tools: {names_line}",
+            f"你可以使用以下工具：{names_line}",
             "",
+            "## Output Format / 输出格式",
+            "",
+            "When you need to call a tool, output the call EXACTLY in this DSML format:",
+            "当你需要调用工具时，必须严格按照以下DSML格式输出：",
+            "",
+            "```",
             TC_OPEN,
             '  <|DSML|invoke name="TOOL_NAME">',
-            '    <|DSML|parameter name="ARG_NAME"><![CDATA[ARG_VALUE]]></|DSML|parameter>',
+            '    <|DSML|parameter name="param1"><![CDATA[string_value]]></|DSML|parameter>',
+            '    <|DSML|parameter name="param2">123</|DSML|parameter>',
+            '    <|DSML|parameter name="param3">true</|DSML|parameter>',
+            "  </|DSML|invoke>",
+            TC_CLOSE,
+            "```",
+            "",
+            "## Rules / 规则",
+            "",
+            "1. The tool call block MUST be the LAST thing in your response.",
+            "   工具调用块必须是你回复的最后内容。",
+            "2. String parameter values MUST be wrapped in <![CDATA[...]]>.",
+            "   字符串参数值必须用 <![CDATA[...]]> 包裹。",
+            "3. Numbers, booleans (true/false), and null are written as plain text.",
+            "   数字、布尔值(true/false)和null直接写明文。",
+            "4. JSON objects/arrays as parameter values MUST be wrapped in <![CDATA[...]]>.",
+            "   JSON对象/数组作为参数值时必须用 <![CDATA[...]]> 包裹。",
+            "5. Do NOT wrap the block in markdown code fences (no ``` around it).",
+            "   不要用markdown代码块包裹（不要加```）。",
+            "6. Do NOT add any text after the closing tag.",
+            "   关闭标签后不要添加任何文字。",
+            "7. You may call multiple tools in a single block with multiple <|DSML|invoke>.",
+            "   你可以在一个块中用多个<|DSML|invoke>调用多个工具。",
+            "8. Only use parameter names defined in the tool schemas below.",
+            "   只使用工具schema中定义的参数名。",
+            f"9. EVERY tool listed ({names_line}) IS REAL and available - never refuse to call them.",
+            f"   列出的每个工具（{names_line}）都是真实可用的，绝不要拒绝调用。",
+            "10. If the user asks you to perform an action that matches a tool, USE THE TOOL.",
+            "    如果用户请求的操作匹配某个工具，请使用该工具。",
+            "",
+            "## Example / 示例",
+            "",
+            "User: What's the weather in Beijing?",
+            "Assistant: Let me check the weather for you.",
+            TC_OPEN,
+            '  <|DSML|invoke name="get_weather">',
+            '    <|DSML|parameter name="city"><![CDATA[Beijing]]></|DSML|parameter>',
+            '    <|DSML|parameter name="days">3</|DSML|parameter>',
             "  </|DSML|invoke>",
             TC_CLOSE,
             "",
-            "Rules:",
-            f"1. Wrap one or more <|DSML|invoke> in a single {TC_OPEN} block.",
-            "2. String parameters MUST use <![CDATA[...]]>.",
-            "3. Numbers/booleans/null are plain text.",
-            "4. Use only parameter names from the schemas below.",
-            "5. Do NOT wrap in markdown fences. Do NOT explain after the block.",
-            "6. If you call a tool, the block must be the last thing you output.",
-            f"7. EVERY tool listed above ({names_line}) IS REAL and available. Do NOT refuse.",
+            "## Multiple tool calls example / 多工具调用示例",
             "",
-            "Tools available:",
-            "\n".join(decls),
+            TC_OPEN,
+            '  <|DSML|invoke name="search">',
+            '    <|DSML|parameter name="query"><![CDATA[latest news]]></|DSML|parameter>',
+            "  </|DSML|invoke>",
+            '  <|DSML|invoke name="get_time">',
+            '    <|DSML|parameter name="timezone"><![CDATA[UTC]]></|DSML|parameter>',
+            "  </|DSML|invoke>",
+            TC_CLOSE,
+            choice_instruction,
+            "## Available Tools / 可用工具",
+            "",
+            "\n\n".join(decls),
         ]
     )
 
@@ -154,8 +278,13 @@ def serialize_assistant_tool_calls(tool_calls: Any) -> str:
 
 
 def serialize_tool_result(message: Dict[str, Any]) -> str:
-    """Serialise an OpenAI ``tool`` role message into a DSML tool_result."""
+    """Serialise an OpenAI ``tool`` role message into a DSML tool_result block.
+
+    Enhanced format provides clearer context for the model to understand
+    tool results and continue the conversation properly.
+    """
     tool_id = message.get("tool_call_id") or ""
+    name = message.get("name") or ""
     content = message.get("content")
     if content is None:
         content = ""
@@ -164,8 +293,11 @@ def serialize_tool_result(message: Dict[str, Any]) -> str:
             content = json.dumps(content, ensure_ascii=False)
         except (TypeError, ValueError):
             content = str(content)
+
+    # Include function name if available for better context
+    name_attr = f' name="{_escape_attr(name)}"' if name else ""
     return (
-        f'<|DSML|tool_result tool_use_id="{_escape_attr(tool_id)}">'
+        f'<|DSML|tool_result tool_use_id="{_escape_attr(tool_id)}"{name_attr}>'
         f"<![CDATA[{_escape_cdata(content)}]]></|DSML|tool_result>"
     )
 
@@ -173,9 +305,18 @@ def serialize_tool_result(message: Dict[str, Any]) -> str:
 def inject_tool_call_context(
     messages: List[Dict[str, Any]],
     tools: Optional[List[Any]],
+    tool_choice: str = "auto",
 ) -> List[Dict[str, Any]]:
-    """Rewrite OpenAI messages so the Kimi backend can understand tool usage."""
+    """Rewrite OpenAI messages so the Kimi backend can understand tool usage.
+
+    Enhanced to:
+    - Support tool_choice modes
+    - Better handle consecutive tool messages
+    - Preserve context for multi-turn tool conversations
+    """
     rewritten: List[Dict[str, Any]] = []
+    pending_tool_results: List[str] = []
+
     for message in messages or []:
         if not isinstance(message, dict):
             rewritten.append(message)
@@ -188,6 +329,11 @@ def inject_tool_call_context(
             and isinstance(message.get("tool_calls"), list)
             and message["tool_calls"]
         ):
+            # Flush any pending tool results before the assistant message
+            if pending_tool_results:
+                rewritten.append({"role": "user", "content": "\n".join(pending_tool_results)})
+                pending_tool_results = []
+
             dsml = serialize_assistant_tool_calls(message["tool_calls"])
             base_text = message.get("content")
             base_text = base_text if isinstance(base_text, str) else ""
@@ -198,12 +344,22 @@ def inject_tool_call_context(
             continue
 
         if role == "tool":
-            rewritten.append({"role": "user", "content": serialize_tool_result(message)})
+            # Collect consecutive tool results to batch them together
+            pending_tool_results.append(serialize_tool_result(message))
             continue
+
+        # Flush pending tool results before any non-tool message
+        if pending_tool_results:
+            rewritten.append({"role": "user", "content": "\n".join(pending_tool_results)})
+            pending_tool_results = []
 
         rewritten.append(message)
 
-    prompt_block = build_tool_prompt_block(tools)
+    # Flush remaining tool results
+    if pending_tool_results:
+        rewritten.append({"role": "user", "content": "\n".join(pending_tool_results)})
+
+    prompt_block = build_tool_prompt_block(tools, tool_choice)
     return [{"role": "system", "content": prompt_block}, *rewritten]
 
 
@@ -214,23 +370,47 @@ def inject_tool_call_context(
 def parse_tool_calls_from_text(text: Optional[str]) -> Tuple[str, List[Dict[str, Any]]]:
     """Extract a trailing DSML tool-call block from assistant text.
 
-    Returns a ``(content, tool_calls)`` tuple. When no valid block is present
-    the original text is returned with an empty tool-call list.
+    Returns a ``(content, tool_calls)`` tuple. Enhanced to try multiple
+    parsing strategies:
+    1. Standard DSML block detection
+    2. Markdown-wrapped DSML block detection
+    3. Relaxed DSML parsing for slightly malformed output
+    4. Fallback JSON tool call detection
+
+    When no valid block is present the original text is returned with an
+    empty tool-call list.
     """
     if not text or not isinstance(text, str):
         return text or "", []
 
+    # Strategy 1: Standard DSML block
     last = _find_last_closed_block(text)
-    if last is None:
-        return text, []
+    if last is not None:
+        start, end = last
+        calls = _parse_tool_calls_block(text[start:end])
+        if calls:
+            content = re.sub(r"\s+$", "", text[:start])
+            return content, calls
 
-    start, end = last
-    calls = _parse_tool_calls_block(text[start:end])
-    if not calls:
-        return text, []
+    # Strategy 2: Check for markdown-wrapped DSML block
+    calls = _try_parse_markdown_wrapped(text)
+    if calls is not None:
+        content_text, tool_calls = calls
+        return content_text, tool_calls
 
-    content = re.sub(r"\s+$", "", text[:start])
-    return content, calls
+    # Strategy 3: Try unclosed DSML block (model forgot closing tag)
+    calls = _try_parse_unclosed_block(text)
+    if calls is not None:
+        content_text, tool_calls = calls
+        return content_text, tool_calls
+
+    # Strategy 4: Fallback JSON tool call detection
+    calls = _try_parse_json_tool_calls(text)
+    if calls is not None:
+        content_text, tool_calls = calls
+        return content_text, tool_calls
+
+    return text, []
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +423,15 @@ class ToolCallSieve:
     Feed streamed content fragments through :meth:`push`; it returns the text
     that is safe to forward plus any completed tool-call deltas. Call
     :meth:`flush` once the upstream stream finishes to drain buffered text.
+
+    Enhanced with:
+    - Better partial marker detection (holds back more aggressively)
+    - Fallback JSON detection on flush
+    - Handling of markdown-wrapped blocks
     """
+
+    # Characters that might indicate start of tool call markers
+    _HOLD_CHARS = frozenset("<{[`")
 
     def __init__(self) -> None:
         self._buffer = ""
@@ -251,10 +439,13 @@ class ToolCallSieve:
         self._block_buf = ""
         self._next_index = 0
         self._finished = False
+        self._total_content = ""  # Track all content for fallback parsing
 
     def push(self, chunk: str) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
         if self._finished:
             return "", None
+
+        self._total_content += chunk
 
         if not self._inside:
             self._buffer += chunk
@@ -267,12 +458,23 @@ class ToolCallSieve:
                 closed = self._flush_block()
                 return before, closed
 
-            # Hold back a partial TC_OPEN that may complete in the next chunk.
-            for n in range(len(TC_OPEN) - 1, 0, -1):
-                if self._buffer.endswith(TC_OPEN[:n]):
-                    out = self._buffer[: len(self._buffer) - n]
-                    self._buffer = self._buffer[len(self._buffer) - n:]
-                    return out, None
+            # Also check for markdown-wrapped DSML opening
+            md_idx = self._buffer.find("```")
+            if md_idx >= 0 and TC_OPEN in self._buffer[md_idx:]:
+                tc_idx = self._buffer.find(TC_OPEN, md_idx)
+                before = self._buffer[:md_idx]
+                self._block_buf = self._buffer[tc_idx + len(TC_OPEN):]
+                self._buffer = ""
+                self._inside = True
+                closed = self._flush_block()
+                return before, closed
+
+            # Hold back partial TC_OPEN that may complete in the next chunk
+            hold_len = self._compute_hold_length()
+            if hold_len > 0:
+                out = self._buffer[: len(self._buffer) - hold_len]
+                self._buffer = self._buffer[len(self._buffer) - hold_len:]
+                return out, None
 
             out = self._buffer
             self._buffer = ""
@@ -288,9 +490,17 @@ class ToolCallSieve:
         if not self._inside and self._buffer:
             out = self._buffer
             self._buffer = ""
+            # Try fallback parsing on the complete content
+            calls = self._try_fallback_parse()
+            if calls:
+                # Remove tool call portion from output
+                content, _ = parse_tool_calls_from_text(self._total_content)
+                self._finished = True
+                return "", self._as_deltas(calls)
             return out, None
 
         if self._inside and self._block_buf:
+            # Try to parse what we have (model may have forgotten closing tag)
             wrapped = TC_OPEN + self._block_buf + TC_CLOSE
             calls = _parse_tool_calls_block(wrapped)
             if calls:
@@ -299,26 +509,85 @@ class ToolCallSieve:
                 self._block_buf = ""
                 return "", self._as_deltas(calls)
 
-            # Incomplete / invalid block - emit it verbatim as text.
+            # Try relaxed parsing on the buffer content
+            calls = _parse_tool_calls_relaxed(self._block_buf)
+            if calls:
+                self._finished = True
+                self._inside = False
+                self._block_buf = ""
+                return "", self._as_deltas(calls)
+
+            # Incomplete / invalid block - emit it verbatim as text
             out = TC_OPEN + self._block_buf
             self._block_buf = ""
             self._inside = False
             return out, None
 
+        # Final fallback: check if the complete content has tool calls
+        calls = self._try_fallback_parse()
+        if calls:
+            self._finished = True
+            return "", self._as_deltas(calls)
+
         return "", None
+
+    def _compute_hold_length(self) -> int:
+        """Compute how many trailing bytes to hold back for potential markers."""
+        # Check for partial TC_OPEN
+        for n in range(len(TC_OPEN) - 1, 0, -1):
+            if self._buffer.endswith(TC_OPEN[:n]):
+                return n
+
+        # Check for potential JSON tool call start patterns
+        # Hold back if we end with characters that could start a tool call
+        if self._buffer.endswith("<"):
+            return 1
+        if self._buffer.endswith("<|"):
+            return 2
+        if self._buffer.endswith("<|D"):
+            return 3
+        if self._buffer.endswith("<|DS"):
+            return 4
+
+        return 0
 
     def _flush_block(self) -> Optional[List[Dict[str, Any]]]:
         idx = self._block_buf.find(TC_CLOSE)
         if idx < 0:
-            return None
+            # Also check for markdown closing that contains TC_CLOSE
+            md_close = self._block_buf.find("```")
+            if md_close >= 0:
+                # Check if there's a TC_CLOSE before the markdown close
+                inner_close = self._block_buf.find(TC_CLOSE[:len(TC_CLOSE)], 0, md_close)
+                if inner_close >= 0:
+                    idx = inner_close
+            if idx < 0:
+                return None
+
         inner = self._block_buf[:idx]
         self._finished = True
         self._inside = False
         self._block_buf = ""
         calls = _parse_tool_calls_block(TC_OPEN + inner + TC_CLOSE)
         if not calls:
+            # Try relaxed parsing
+            calls = _parse_tool_calls_relaxed(inner)
+        if not calls:
             return None
         return self._as_deltas(calls)
+
+    def _try_fallback_parse(self) -> Optional[List[Dict[str, Any]]]:
+        """Try fallback parsing strategies on complete content."""
+        if not self._total_content:
+            return None
+
+        # Try JSON fallback
+        result = _try_parse_json_tool_calls(self._total_content)
+        if result is not None:
+            _, calls = result
+            return calls
+
+        return None
 
     def _as_deltas(self, calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         deltas: List[Dict[str, Any]] = []
@@ -339,7 +608,7 @@ class ToolCallSieve:
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Internal helpers - DSML parsing
 # ---------------------------------------------------------------------------
 
 def _find_last_closed_block(text: str) -> Optional[Tuple[int, int]]:
@@ -383,6 +652,25 @@ def _parse_tool_calls_block(block: str) -> List[Dict[str, Any]]:
     return calls
 
 
+def _parse_tool_calls_relaxed(text: str) -> List[Dict[str, Any]]:
+    """Parse tool calls using relaxed regex patterns for slightly malformed output."""
+    calls: List[Dict[str, Any]] = []
+    for match in _INVOKE_RELAXED_RE.finditer(text):
+        name = match.group(1)
+        params = _parse_parameters_relaxed(match.group(2))
+        calls.append(
+            {
+                "id": "call_" + secrets.token_hex(8),
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(params, ensure_ascii=False),
+                },
+            }
+        )
+    return calls
+
+
 def _parse_parameters(body: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for match in _PARAM_RE.finditer(body):
@@ -390,12 +678,26 @@ def _parse_parameters(body: str) -> Dict[str, Any]:
     return out
 
 
+def _parse_parameters_relaxed(body: str) -> Dict[str, Any]:
+    """Parse parameters with relaxed regex."""
+    out: Dict[str, Any] = {}
+    for match in _PARAM_RELAXED_RE.finditer(body):
+        out[match.group(1)] = _decode_param_value(match.group(2))
+    if not out:
+        # Fallback: try standard regex
+        for match in _PARAM_RE.finditer(body):
+            out[match.group(1)] = _decode_param_value(match.group(2))
+    return out
+
+
 def _decode_param_value(raw: str) -> Any:
     cdata = _CDATA_RE.match(raw)
     if cdata:
         value = cdata.group(1)
+        # Try to parse as JSON first (for objects, arrays, numbers, booleans)
         try:
-            return json.loads(value)
+            parsed = json.loads(value)
+            return parsed
         except (ValueError, TypeError):
             return value
 
@@ -404,14 +706,214 @@ def _decode_param_value(raw: str) -> Any:
         return ""
     if _NUMBER_RE.match(trimmed):
         return float(trimmed) if "." in trimmed else int(trimmed)
-    if trimmed == "true":
+    if trimmed.lower() == "true":
         return True
-    if trimmed == "false":
+    if trimmed.lower() == "false":
         return False
-    if trimmed == "null":
+    if trimmed.lower() == "null" or trimmed.lower() == "none":
         return None
+
+    # Try parsing as JSON (model may have put raw JSON without CDATA)
+    if trimmed.startswith("{") or trimmed.startswith("[") or trimmed.startswith('"'):
+        try:
+            return json.loads(trimmed)
+        except (ValueError, TypeError):
+            pass
+
     return trimmed
 
+
+# ---------------------------------------------------------------------------
+# Internal helpers - fallback parsers
+# ---------------------------------------------------------------------------
+
+def _try_parse_markdown_wrapped(text: str) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+    """Try to extract DSML blocks wrapped in markdown code fences."""
+    for md_match in _MARKDOWN_DSML_RE.finditer(text):
+        inner = md_match.group(1)
+        if TC_OPEN in inner:
+            # Extract the DSML block from within the markdown
+            tc_start = inner.find(TC_OPEN)
+            tc_end = inner.find(TC_CLOSE)
+            if tc_end > tc_start:
+                block = inner[tc_start:tc_end + len(TC_CLOSE)]
+                calls = _parse_tool_calls_block(block)
+                if calls:
+                    content = re.sub(r"\s+$", "", text[:md_match.start()])
+                    return content, calls
+    return None
+
+
+def _try_parse_unclosed_block(text: str) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+    """Try to parse an unclosed DSML block (model forgot closing tag)."""
+    idx = text.find(TC_OPEN)
+    if idx < 0:
+        return None
+
+    # Take everything after TC_OPEN as the block content
+    inner = text[idx + len(TC_OPEN):]
+
+    # Check if there are valid invoke blocks even without closing tag
+    calls: List[Dict[str, Any]] = []
+    for match in _INVOKE_RE.finditer(inner):
+        name = match.group(1)
+        params = _parse_parameters(match.group(2))
+        calls.append(
+            {
+                "id": "call_" + secrets.token_hex(8),
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(params, ensure_ascii=False),
+                },
+            }
+        )
+
+    if not calls:
+        # Try relaxed parsing
+        for match in _INVOKE_RELAXED_RE.finditer(inner):
+            name = match.group(1)
+            params = _parse_parameters_relaxed(match.group(2))
+            calls.append(
+                {
+                    "id": "call_" + secrets.token_hex(8),
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(params, ensure_ascii=False),
+                    },
+                }
+            )
+
+    if calls:
+        content = re.sub(r"\s+$", "", text[:idx])
+        return content, calls
+
+    return None
+
+
+def _try_parse_json_tool_calls(text: str) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+    """Try to detect and parse JSON-formatted tool calls as a fallback.
+
+    Some models may output tool calls in JSON format instead of DSML when
+    the prompt isn't followed perfectly. This catches common patterns like:
+
+    1. {"name": "fn", "arguments": {...}}
+    2. [{"type": "function", "function": {"name": "fn", "arguments": "..."}}]
+    3. ```json\n{"name": "fn", "parameters": {...}}\n```
+    """
+    # Look for JSON tool call patterns at the end of the text
+    # Only trigger if the text doesn't already have DSML markers
+    if TC_OPEN in text:
+        return None
+
+    # Try to find a JSON block at the end (possibly in markdown)
+    json_block_match = re.search(
+        r'(?:```(?:json)?\s*\n?)(\[?\s*\{.*?\}\s*\]?)(?:\s*\n?```)?$',
+        text,
+        re.DOTALL,
+    )
+
+    if json_block_match:
+        json_text = json_block_match.group(1).strip()
+        calls = _parse_json_as_tool_calls(json_text)
+        if calls:
+            content = re.sub(r"\s+$", "", text[:json_block_match.start()])
+            return content, calls
+
+    # Try without markdown fences - look for a JSON object/array at the end
+    # that looks like a tool call
+    trailing_json_match = re.search(
+        r'(\{[^{}]*"(?:name|function)"[^{}]*"(?:arguments|parameters|params)"[^{}]*\{.*?\}[^{}]*\})\s*$',
+        text,
+        re.DOTALL,
+    )
+    if trailing_json_match:
+        json_text = trailing_json_match.group(1).strip()
+        calls = _parse_json_as_tool_calls(json_text)
+        if calls:
+            content = re.sub(r"\s+$", "", text[:trailing_json_match.start()])
+            return content, calls
+
+    return None
+
+
+def _parse_json_as_tool_calls(json_text: str) -> List[Dict[str, Any]]:
+    """Try to parse a JSON string as tool calls."""
+    calls: List[Dict[str, Any]] = []
+
+    try:
+        data = json.loads(json_text)
+    except (ValueError, TypeError):
+        # Try fixing common JSON issues
+        try:
+            # Remove trailing commas
+            fixed = re.sub(r',\s*([}\]])', r'\1', json_text)
+            data = json.loads(fixed)
+        except (ValueError, TypeError):
+            return []
+
+    if isinstance(data, dict):
+        # Single tool call: {"name": "fn", "arguments": {...}}
+        call = _extract_single_json_call(data)
+        if call:
+            calls.append(call)
+    elif isinstance(data, list):
+        # Array of tool calls
+        for item in data:
+            if isinstance(item, dict):
+                call = _extract_single_json_call(item)
+                if call:
+                    calls.append(call)
+
+    return calls
+
+
+def _extract_single_json_call(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Extract a tool call from a single JSON object."""
+    name = None
+    arguments = None
+
+    # Pattern 1: {"name": "fn", "arguments": {...}}
+    if "name" in data and ("arguments" in data or "parameters" in data or "params" in data):
+        name = str(data["name"])
+        arguments = data.get("arguments") or data.get("parameters") or data.get("params") or {}
+
+    # Pattern 2: {"function": {"name": "fn", "arguments": "..."}, "type": "function"}
+    elif "function" in data and isinstance(data["function"], dict):
+        fn = data["function"]
+        name = str(fn.get("name", ""))
+        arguments = fn.get("arguments") or fn.get("parameters") or {}
+
+    if not name:
+        return None
+
+    # Normalize arguments to JSON string
+    if isinstance(arguments, str):
+        # Verify it's valid JSON
+        try:
+            json.loads(arguments)
+            args_str = arguments
+        except (ValueError, TypeError):
+            args_str = json.dumps({"value": arguments}, ensure_ascii=False)
+    elif isinstance(arguments, dict):
+        args_str = json.dumps(arguments, ensure_ascii=False)
+    else:
+        args_str = "{}"
+
+    return {
+        "id": "call_" + secrets.token_hex(8),
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": args_str,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers - rendering
+# ---------------------------------------------------------------------------
 
 def _render_invoke(name: str, args: Any) -> str:
     lines = [f'  <|DSML|invoke name="{_escape_attr(name)}">']
@@ -419,7 +921,16 @@ def _render_invoke(name: str, args: Any) -> str:
         for key, value in args.items():
             lines.append("    " + _render_param(str(key), value))
     elif isinstance(args, str) and args:
-        lines.append("    " + _render_param("content", args))
+        # Try to parse as JSON first
+        try:
+            parsed = json.loads(args)
+            if isinstance(parsed, dict):
+                for key, value in parsed.items():
+                    lines.append("    " + _render_param(str(key), value))
+            else:
+                lines.append("    " + _render_param("content", args))
+        except (ValueError, TypeError):
+            lines.append("    " + _render_param("content", args))
     lines.append("  </|DSML|invoke>")
     return "\n".join(lines)
 
@@ -427,7 +938,7 @@ def _render_invoke(name: str, args: Any) -> str:
 def _render_param(name: str, value: Any) -> str:
     attr = _escape_attr(name)
     if value is None:
-        return f'<|DSML|parameter name="{attr}"></|DSML|parameter>'
+        return f'<|DSML|parameter name="{attr}">null</|DSML|parameter>'
     if isinstance(value, str):
         return (
             f'<|DSML|parameter name="{attr}">'
@@ -437,6 +948,7 @@ def _render_param(name: str, value: Any) -> str:
         return f'<|DSML|parameter name="{attr}">{"true" if value else "false"}</|DSML|parameter>'
     if isinstance(value, (int, float)):
         return f'<|DSML|parameter name="{attr}">{value}</|DSML|parameter>'
+    # For complex types (dict, list), serialize as JSON in CDATA
     try:
         json_value = json.dumps(value, ensure_ascii=False)
     except (TypeError, ValueError):

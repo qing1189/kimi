@@ -26,7 +26,7 @@ from .streaming import (
     _create_streaming_chat_response,
     _create_streaming_responses_response,
 )
-from .toolcall import has_tools, inject_tool_call_context
+from .toolcall import has_tools, inject_tool_call_context, _get_tool_choice_mode
 
 router = APIRouter()
 
@@ -109,7 +109,8 @@ async def create_chat_completion(request: Request) -> Any:
 
     tools_enabled = has_tools(payload)
     if tools_enabled:
-        messages = inject_tool_call_context(messages, payload.get("tools"))
+        tool_choice = _get_tool_choice_mode(payload)
+        messages = inject_tool_call_context(messages, payload.get("tools"), tool_choice)
 
     if stream:
         return StreamingResponse(
