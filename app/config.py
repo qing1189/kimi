@@ -66,6 +66,11 @@ class Config:
     REQUEST_LOG_RETENTION: int = 1000
     REQUEST_LOG_BODY_LIMIT: int = 1048576
     TIMEZONE: str = "Asia/Shanghai"
+    # HTTP 性能配置
+    HTTP_MAX_CONNECTIONS: int = 100
+    HTTP_MAX_KEEPALIVE_CONNECTIONS: int = 20
+    HTTP_KEEPALIVE_EXPIRY: float = 30.0
+    HTTP2_ENABLED: bool = False  # 需要安装 httpx[http2]
 
     @classmethod
     def load(cls) -> None:
@@ -102,3 +107,10 @@ class Config:
         cls.REQUEST_LOG_RETENTION = int(os.getenv("REQUEST_LOG_RETENTION", "1000"))
         cls.REQUEST_LOG_BODY_LIMIT = _request_log_body_limit()
         cls.TIMEZONE = os.getenv("TIMEZONE") or os.getenv("TZ", "Asia/Shanghai")
+        # HTTP 性能配置
+        cls.HTTP_MAX_CONNECTIONS = max(int(os.getenv("HTTP_MAX_CONNECTIONS", "100")), 1)
+        cls.HTTP_MAX_KEEPALIVE_CONNECTIONS = max(
+            int(os.getenv("HTTP_MAX_KEEPALIVE_CONNECTIONS", "20")), 1
+        )
+        cls.HTTP_KEEPALIVE_EXPIRY = max(float(os.getenv("HTTP_KEEPALIVE_EXPIRY", "30.0")), 0.0)
+        cls.HTTP2_ENABLED = os.getenv("HTTP2_ENABLED", "false").lower() in {"1", "true", "yes", "on"}

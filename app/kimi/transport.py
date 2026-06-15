@@ -194,10 +194,27 @@ class KimiTransport:
         self.max_retries = max(int(max_retries), 1)
         self._rate_limiter = rate_limiter or get_rate_limiter()
         self._closed = False
+
+        # 优化连接池配置（可通过环境变量调整）
+        # - max_connections: 总连接数上限，避免过多连接占用资源
+        # - max_keepalive_connections: 保持活跃的连接数，提高复用率
+        # - keepalive_expiry: 连接保持时间，平衡复用和资源释放
+        limits = httpx.Limits(
+            max_connections=Config.HTTP_MAX_CONNECTIONS,
+            max_keepalive_connections=Config.HTTP_MAX_KEEPALIVE_CONNECTIONS,
+            keepalive_expiry=Config.HTTP_KEEPALIVE_EXPIRY,
+        )
+
         client_kwargs: Dict[str, Any] = {
             "timeout": httpx.Timeout(self.timeout),
             "follow_redirects": True,
+            "limits": limits,
         }
+
+        # 启用 HTTP/2 支持（如果配置启用）
+        if Config.HTTP2_ENABLED:
+            client_kwargs["http2"] = True
+
         if http_transport is not None:
             client_kwargs["transport"] = http_transport
         self._client = httpx.AsyncClient(**client_kwargs)
