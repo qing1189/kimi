@@ -94,7 +94,7 @@ _（最初主要面向酒馆类场景；现已通过 DSML 协议补充了 OpenAI
 
 - OpenAI 兼容接口：Models、Chat Completions、Legacy Completions、Responses API。
 - 支持流式和非流式输出。
-- 支持 OpenAI 格式的工具调用（Function Calling）：通过 DSML 协议在 prompt 层实现，流式与非流式均可用。
+- **支持 OpenAI 格式的工具调用（Function Calling）**：通过 DSML 协议在 prompt 层实现，流式与非流式均可用。[📖 查看使用文档](docs/tool-calling.md)
 - 支持 Kimi thinking、search、agent 相关模型能力和兼容参数。
 - 支持多个 Kimi 账号组成账号池，按健康状态、并发占用和轮询策略调度。
 - 支持 refresh token 自动换取 access token，并把换到的 access token 缓存到本地，服务重启后可复用。
