@@ -50,6 +50,7 @@ async def _stream_chat_chunks(
 ) -> AsyncIterator[str]:
     sieve = ToolCallSieve() if tools_enabled else None
     tool_calls_emitted = False
+    content_emitted = False
 
     async for chunk in stream:
         if sieve is None:
@@ -63,6 +64,7 @@ async def _stream_chat_chunks(
         if delta.get("content"):
             text_delta, tool_calls_delta = sieve.push(delta["content"])
             if text_delta:
+                content_emitted = True
                 yield _chat_chunk_sse(
                     chunk,
                     response_model,
@@ -86,6 +88,7 @@ async def _stream_chat_chunks(
         if finish_reason is not None:
             text_delta, tool_calls_delta = sieve.flush()
             if text_delta:
+                content_emitted = True
                 yield _chat_chunk_sse(
                     chunk,
                     response_model,

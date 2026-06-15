@@ -16,9 +16,22 @@ from .kimi.transport import close_shared_transports
 logger = logging.getLogger("kimi2api.bootstrap")
 
 
+def _configure_logging() -> None:
+    """Configure logging level from environment."""
+    import os
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
 def load_runtime_config() -> None:
     load_dotenv()
     Config.load()
+    _configure_logging()
 
 
 def initialize_runtime() -> None:

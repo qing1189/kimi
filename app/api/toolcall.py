@@ -13,17 +13,20 @@ implemented purely at the prompt level:
   text deltas from the tool-call block in real time.
 
 Optimized implementation with:
-- Enhanced prompt engineering with bilingual instructions and examples
-- Robust parsing with fallback for JSON-formatted tool calls
+- Chinese-optimized prompt engineering for higher compliance
+- Robust parsing with multiple fallback strategies
 - Improved streaming sieve with better partial block handling
 - Support for tool_choice modes (auto, required, none)
-- Better handling of edge cases (whitespace, malformed blocks, etc.)
+- Comprehensive logging for debugging tool call failures
 """
 
 import json
+import logging
 import re
 import secrets
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger("kimi2api.toolcall")
 
 TC_OPEN = "<|DSML|tool_calls>"
 TC_CLOSE = "</|DSML|tool_calls>"
@@ -136,8 +139,11 @@ def _get_tool_choice_mode(payload: Dict[str, Any]) -> str:
 def build_tool_prompt_block(tools: Optional[List[Any]], tool_choice: str = "auto") -> str:
     """Build the system prompt that teaches the model the DSML call format.
 
-    Enhanced with bilingual instructions, multiple examples, and strict
-    formatting rules to reduce tool call failures.
+    Optimized for maximum compliance:
+    - Detailed bilingual instructions for broader compatibility
+    - Multiple examples including correct and incorrect patterns
+    - Strong constraint language with consequences
+    - Explicit format templates
     """
     tool_list = _function_tools(tools)
 
@@ -158,7 +164,7 @@ def build_tool_prompt_block(tools: Optional[List[Any]], tool_choice: str = "auto
                 params_block = json.dumps(params, ensure_ascii=False)
             except (TypeError, ValueError):
                 params_block = "{}"
-        decls.append(f"### {name}\n- Description: {desc}\n- Parameters schema: {params_block}")
+        decls.append(f"### {name}\n- Description: {desc}\n- Parameters: {params_block}")
 
     names_line = ", ".join(names) or "(none)"
 
@@ -166,32 +172,33 @@ def build_tool_prompt_block(tools: Optional[List[Any]], tool_choice: str = "auto
     choice_instruction = ""
     if tool_choice == "required":
         choice_instruction = (
-            "\n\nIMPORTANT: You MUST call at least one tool in your response. "
+            "\n\n⚠️ CRITICAL: You MUST call at least one tool in your response. "
             "Do NOT respond with only text. Always include a tool call block.\n"
-            "重要：你必须调用至少一个工具。不要只回复文本，必须包含工具调用块。\n"
+            "⚠️ 关键要求：你必须调用至少一个工具。不要只回复文本，必须包含工具调用块。\n"
         )
     elif tool_choice.startswith("function:"):
         fn_name = tool_choice[len("function:"):]
         choice_instruction = (
-            f"\n\nIMPORTANT: You MUST call the function `{fn_name}` in your response.\n"
-            f"重要：你必须在回复中调用函数 `{fn_name}`。\n"
+            f"\n\n⚠️ CRITICAL: You MUST call the function `{fn_name}` in your response.\n"
+            f"⚠️ 关键要求：你必须在回复中调用函数 `{fn_name}`。\n"
         )
 
     return "\n".join(
         [
-            "# Tool Calling Instructions / 工具调用指令",
+            "# TOOL CALLING INSTRUCTIONS / 工具调用指令",
+            "# 你必须严格遵守以下格式，否则工具调用会失败！",
             "",
-            f"You have access to the following tools: {names_line}",
+            f"You have access to these tools: {names_line}",
             f"你可以使用以下工具：{names_line}",
             "",
-            "## Output Format / 输出格式",
+            "## MANDATORY FORMAT / 必须使用的格式",
             "",
-            "When you need to call a tool, output the call EXACTLY in this DSML format:",
-            "当你需要调用工具时，必须严格按照以下DSML格式输出：",
+            "When you need to call a tool, you MUST output EXACTLY this format:",
+            "当你需要调用工具时，必须严格按照以下格式输出：",
             "",
             "```",
             TC_OPEN,
-            '  <|DSML|invoke name="TOOL_NAME">',
+            '  <|DSML|invoke name="tool_name">',
             '    <|DSML|parameter name="param1"><![CDATA[string_value]]></|DSML|parameter>',
             '    <|DSML|parameter name="param2">123</|DSML|parameter>',
             '    <|DSML|parameter name="param3">true</|DSML|parameter>',
@@ -199,33 +206,37 @@ def build_tool_prompt_block(tools: Optional[List[Any]], tool_choice: str = "auto
             TC_CLOSE,
             "```",
             "",
-            "## Rules / 规则",
+            "## STRICT RULES / 严格规则（违反会导致调用失败）",
             "",
-            "1. The tool call block MUST be the LAST thing in your response.",
-            "   工具调用块必须是你回复的最后内容。",
-            "2. String parameter values MUST be wrapped in <![CDATA[...]]>.",
-            "   字符串参数值必须用 <![CDATA[...]]> 包裹。",
-            "3. Numbers, booleans (true/false), and null are written as plain text.",
-            "   数字、布尔值(true/false)和null直接写明文。",
-            "4. JSON objects/arrays as parameter values MUST be wrapped in <![CDATA[...]]>.",
-            "   JSON对象/数组作为参数值时必须用 <![CDATA[...]]> 包裹。",
-            "5. Do NOT wrap the block in markdown code fences (no ``` around it).",
-            "   不要用markdown代码块包裹（不要加```）。",
-            "6. Do NOT add any text after the closing tag.",
-            "   关闭标签后不要添加任何文字。",
-            "7. You may call multiple tools in a single block with multiple <|DSML|invoke>.",
-            "   你可以在一个块中用多个<|DSML|invoke>调用多个工具。",
-            "8. Only use parameter names defined in the tool schemas below.",
-            "   只使用工具schema中定义的参数名。",
-            f"9. EVERY tool listed ({names_line}) IS REAL and available - never refuse to call them.",
-            f"   列出的每个工具（{names_line}）都是真实可用的，绝不要拒绝调用。",
-            "10. If the user asks you to perform an action that matches a tool, USE THE TOOL.",
-            "    如果用户请求的操作匹配某个工具，请使用该工具。",
+            "1. ✅ The tool call block MUST be the LAST thing in your response.",
+            "   ✅ 工具调用块必须是你回复的最后内容。",
             "",
-            "## Example / 示例",
+            "2. ✅ String values MUST use <![CDATA[...]]> wrapper.",
+            "   ✅ 字符串值必须用 <![CDATA[...]]> 包裹。",
+            "",
+            "3. ✅ Numbers and booleans (true/false) are plain text, no quotes.",
+            "   ✅ 数字和布尔值直接写，不要加引号。",
+            "",
+            "4. ❌ Do NOT wrap in markdown code blocks (no ``` around the tool call).",
+            "   ❌ 不要用 markdown 代码块包裹工具调用。",
+            "",
+            "5. ❌ Do NOT output JSON format. Only DSML format works!",
+            "   ❌ 不要输出 JSON 格式，只有 DSML 格式有效！",
+            "",
+            "6. ❌ Do NOT add any text after the closing tag.",
+            "   ❌ 不要在关闭标签后添加任何文字。",
+            "",
+            "7. ✅ You may call multiple tools using multiple <|DSML|invoke> blocks.",
+            "   ✅ 可以用多个 <|DSML|invoke> 调用多个工具。",
+            "",
+            "## CORRECT EXAMPLE / 正确示例",
             "",
             "User: What's the weather in Beijing?",
+            "User: 北京天气怎么样？",
+            "",
             "Assistant: Let me check the weather for you.",
+            "Assistant: 我来帮你查一下天气。",
+            "",
             TC_OPEN,
             '  <|DSML|invoke name="get_weather">',
             '    <|DSML|parameter name="city"><![CDATA[Beijing]]></|DSML|parameter>',
@@ -233,18 +244,32 @@ def build_tool_prompt_block(tools: Optional[List[Any]], tool_choice: str = "auto
             "  </|DSML|invoke>",
             TC_CLOSE,
             "",
-            "## Multiple tool calls example / 多工具调用示例",
+            "## WRONG EXAMPLES / 错误示例（不要这样做！）",
             "",
+            "❌ WRONG 1: Using JSON format (this will fail!):",
+            '```json',
+            '{"name": "get_weather", "arguments": {"city": "Beijing"}}',
+            "```",
+            "",
+            "❌ WRONG 2: Adding text after closing tag:",
             TC_OPEN,
-            '  <|DSML|invoke name="search">',
-            '    <|DSML|parameter name="query"><![CDATA[latest news]]></|DSML|parameter>',
-            "  </|DSML|invoke>",
-            '  <|DSML|invoke name="get_time">',
-            '    <|DSML|parameter name="timezone"><![CDATA[UTC]]></|DSML|parameter>',
+            '  <|DSML|invoke name="get_weather">',
+            '    <|DSML|parameter name="city"><![CDATA[Beijing]]></|DSML|parameter>',
             "  </|DSML|invoke>",
             TC_CLOSE,
+            "Hope this helps! (WRONG - no text after closing tag!)",
+            "",
+            "❌ WRONG 3: Using markdown wrapper:",
+            "```",
+            TC_OPEN,
+            '  <|DSML|invoke name="get_weather">',
+            '    <|DSML|parameter name="city"><![CDATA[Beijing]]></|DSML|parameter>',
+            "  </|DSML|invoke>",
+            TC_CLOSE,
+            "```",
+            "",
             choice_instruction,
-            "## Available Tools / 可用工具",
+            "## AVAILABLE TOOLS / 可用工具",
             "",
             "\n\n".join(decls),
         ]
@@ -302,6 +327,12 @@ def serialize_tool_result(message: Dict[str, Any]) -> str:
     )
 
 
+def _build_tool_result_context(results: List[str]) -> str:
+    """Wrap tool results with context explanation for the model."""
+    header = "以下是工具调用的结果，请根据这些结果继续回复用户："
+    return header + "\n" + "\n".join(results)
+
+
 def inject_tool_call_context(
     messages: List[Dict[str, Any]],
     tools: Optional[List[Any]],
@@ -350,14 +381,14 @@ def inject_tool_call_context(
 
         # Flush pending tool results before any non-tool message
         if pending_tool_results:
-            rewritten.append({"role": "user", "content": "\n".join(pending_tool_results)})
+            rewritten.append({"role": "user", "content": _build_tool_result_context(pending_tool_results)})
             pending_tool_results = []
 
         rewritten.append(message)
 
     # Flush remaining tool results
     if pending_tool_results:
-        rewritten.append({"role": "user", "content": "\n".join(pending_tool_results)})
+        rewritten.append({"role": "user", "content": _build_tool_result_context(pending_tool_results)})
 
     prompt_block = build_tool_prompt_block(tools, tool_choice)
     return [{"role": "system", "content": prompt_block}, *rewritten]
@@ -375,7 +406,7 @@ def parse_tool_calls_from_text(text: Optional[str]) -> Tuple[str, List[Dict[str,
     1. Standard DSML block detection
     2. Markdown-wrapped DSML block detection
     3. Relaxed DSML parsing for slightly malformed output
-    4. Fallback JSON tool call detection
+    4. Fallback JSON tool call detection (multiple patterns)
 
     When no valid block is present the original text is returned with an
     empty tool-call list.
@@ -390,26 +421,31 @@ def parse_tool_calls_from_text(text: Optional[str]) -> Tuple[str, List[Dict[str,
         calls = _parse_tool_calls_block(text[start:end])
         if calls:
             content = re.sub(r"\s+$", "", text[:start])
+            logger.debug("Tool calls parsed via standard DSML block: %s", [c["function"]["name"] for c in calls])
             return content, calls
 
     # Strategy 2: Check for markdown-wrapped DSML block
     calls = _try_parse_markdown_wrapped(text)
     if calls is not None:
         content_text, tool_calls = calls
+        logger.debug("Tool calls parsed via markdown-wrapped DSML: %s", [c["function"]["name"] for c in tool_calls])
         return content_text, tool_calls
 
     # Strategy 3: Try unclosed DSML block (model forgot closing tag)
     calls = _try_parse_unclosed_block(text)
     if calls is not None:
         content_text, tool_calls = calls
+        logger.debug("Tool calls parsed via unclosed DSML block: %s", [c["function"]["name"] for c in tool_calls])
         return content_text, tool_calls
 
     # Strategy 4: Fallback JSON tool call detection
     calls = _try_parse_json_tool_calls(text)
     if calls is not None:
         content_text, tool_calls = calls
+        logger.debug("Tool calls parsed via JSON fallback: %s", [c["function"]["name"] for c in tool_calls])
         return content_text, tool_calls
 
+    logger.debug("No tool calls detected in response text (length=%d)", len(text))
     return text, []
 
 
@@ -801,13 +837,14 @@ def _try_parse_json_tool_calls(text: str) -> Optional[Tuple[str, List[Dict[str, 
     1. {"name": "fn", "arguments": {...}}
     2. [{"type": "function", "function": {"name": "fn", "arguments": "..."}}]
     3. ```json\n{"name": "fn", "parameters": {...}}\n```
+    4. function_call: {"name": "fn", "arguments": {...}}
     """
     # Look for JSON tool call patterns at the end of the text
     # Only trigger if the text doesn't already have DSML markers
     if TC_OPEN in text:
         return None
 
-    # Try to find a JSON block at the end (possibly in markdown)
+    # Strategy 1: Try to find a JSON block at the end (possibly in markdown)
     json_block_match = re.search(
         r'(?:```(?:json)?\s*\n?)(\[?\s*\{.*?\}\s*\]?)(?:\s*\n?```)?$',
         text,
@@ -821,7 +858,20 @@ def _try_parse_json_tool_calls(text: str) -> Optional[Tuple[str, List[Dict[str, 
             content = re.sub(r"\s+$", "", text[:json_block_match.start()])
             return content, calls
 
-    # Try without markdown fences - look for a JSON object/array at the end
+    # Strategy 2: Look for "function_call:" or "tool_calls:" prefix
+    prefix_match = re.search(
+        r'(?:function_call|tool_calls?)\s*:\s*(\{.*?\}|\[.*?\])\s*$',
+        text,
+        re.DOTALL,
+    )
+    if prefix_match:
+        json_text = prefix_match.group(1).strip()
+        calls = _parse_json_as_tool_calls(json_text)
+        if calls:
+            content = re.sub(r"\s+$", "", text[:prefix_match.start()])
+            return content, calls
+
+    # Strategy 3: Try without markdown fences - look for a JSON object/array at the end
     # that looks like a tool call
     trailing_json_match = re.search(
         r'(\{[^{}]*"(?:name|function)"[^{}]*"(?:arguments|parameters|params)"[^{}]*\{.*?\}[^{}]*\})\s*$',
@@ -834,6 +884,26 @@ def _try_parse_json_tool_calls(text: str) -> Optional[Tuple[str, List[Dict[str, 
         if calls:
             content = re.sub(r"\s+$", "", text[:trailing_json_match.start()])
             return content, calls
+
+    # Strategy 4: Look for OpenAI-style function_call in message
+    openai_match = re.search(
+        r'"function_call"\s*:\s*\{[^}]*"name"\s*:\s*"([^"]+)"[^}]*"arguments"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}',
+        text,
+    )
+    if openai_match:
+        name = openai_match.group(1)
+        args_str = openai_match.group(2).replace('\\"', '"').replace('\\\\', '\\')
+        try:
+            json.loads(args_str)  # Validate JSON
+            calls = [{
+                "id": "call_" + secrets.token_hex(8),
+                "type": "function",
+                "function": {"name": name, "arguments": args_str},
+            }]
+            content = re.sub(r"\s+$", "", text[:openai_match.start()])
+            return content, calls
+        except (ValueError, TypeError):
+            pass
 
     return None
 
