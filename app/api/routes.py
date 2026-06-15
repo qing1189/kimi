@@ -41,8 +41,68 @@ def _set_kimi_account(request: Request, account: Dict[str, str]) -> None:
 # ---------------------------------------------------------------------------
 
 @router.get("/healthz")
-async def healthz() -> Dict[str, str]:
-    return {"status": "ok"}
+async def healthz() -> Dict[str, Any]:
+    """健康检查端点，返回服务状态和基本信息"""
+    from ..core.kimi_account_pool import get_account_pool
+    from ..dashboard.view_models import dashboard_stats
+
+    # 基础健康状态
+    health_info: Dict[str, Any] = {
+        "status": "ok",
+        "timestamp": time.time(),
+    }
+
+    # 账号池状态
+    try:
+        pool = get_account_pool(required=False)
+        if pool:
+            accounts_status = {
+                "total": len(pool._accounts),
+                "healthy": sum(1 for acc in pool._accounts if acc.selectable),
+            }
+            health_info["accounts"] = accounts_status
+    except Exception:
+        pass
+
+    return health_info
+
+
+@router.get("/readiness")
+async def readiness() -> Dict[str, Any]:
+    """就绪探针，检查服务是否准备好接收请求"""
+    from ..core.kimi_account_pool import get_account_pool
+    from ..config import Config
+
+    ready = True
+    checks: Dict[str, Any] = {}
+
+    # 检查配置
+    if not Config.ADMIN_PASSWORD:
+        checks["admin_password"] = {"status": "warning", "message": "未配置管理密码"}
+    else:
+        checks["admin_password"] = {"status": "ok"}
+
+    # 检查账号池
+    try:
+        pool = get_account_pool(required=False)
+        if pool:
+            healthy_count = sum(1 for acc in pool._accounts if acc.selectable)
+            if healthy_count > 0:
+                checks["accounts"] = {"status": "ok", "healthy": healthy_count}
+            else:
+                checks["accounts"] = {"status": "degraded", "message": "没有健康的账号"}
+                ready = False
+        else:
+            checks["accounts"] = {"status": "not_configured"}
+    except Exception as e:
+        checks["accounts"] = {"status": "error", "message": str(e)}
+        ready = False
+
+    return {
+        "ready": ready,
+        "checks": checks,
+        "timestamp": time.time(),
+    }
 
 
 # ---------------------------------------------------------------------------

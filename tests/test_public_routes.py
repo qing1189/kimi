@@ -13,7 +13,19 @@ def test_healthz_remains_public(api_client):
     response = api_client.get("/healthz")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "timestamp" in data
+
+
+def test_readiness_endpoint(api_client):
+    response = api_client.get("/readiness")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "ready" in data
+    assert "checks" in data
+    assert "timestamp" in data
 
 
 @pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
