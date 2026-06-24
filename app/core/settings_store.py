@@ -99,10 +99,7 @@ def get_auto_delete_chat_mode() -> str:
     Returns:
         str: disabled, on_completion, always
     """
-    # 优先使用数据库设置，如果没有则使用环境变量
-    db_mode = get_setting("auto_delete_chat", None)
-    if db_mode is not None and db_mode in {"disabled", "on_completion", "always"}:
-        return db_mode
-
-    # 回退到环境变量配置
-    return getattr(Config, "AUTO_DELETE_CHAT", "disabled")
+    mode = get_setting("auto_delete_chat", "disabled")
+    if mode in {"disabled", "on_completion", "always"}:
+        return mode
+    return "disabled"
