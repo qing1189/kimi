@@ -175,4 +175,24 @@ export const api = {
     request<import("@/types").CheckAllResponse>("/tokens/check-all", {
       method: "POST",
     }),
+
+  getSettings: () =>
+    request<{
+      auto_delete_chat: "disabled" | "on_completion" | "always"
+      version: number
+    }>("/settings"),
+
+  updateSettings: (settings: {
+    auto_delete_chat: "disabled" | "on_completion" | "always"
+  }) =>
+    request<{
+      success: boolean
+      settings: {
+        auto_delete_chat: "disabled" | "on_completion" | "always"
+        version: number
+      }
+    }>("/settings", {
+      method: "POST",
+      body: JSON.stringify(settings),
+    }),
 }

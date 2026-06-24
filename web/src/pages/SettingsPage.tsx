@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { api, ApiClientError } from "@/lib/api-client";
 
 interface Settings {
   auto_delete_chat: "disabled" | "on_completion" | "always";
@@ -20,23 +21,14 @@ export default function SettingsPage() {
 
   const loadSettings = async () => {
     try {
-      const response = await fetch("/admin/api/settings", {
-        credentials: "include",
-      });
-
-      if (response.status === 401) {
-        navigate("/admin");
-        return;
-      }
-
-      if (!response.ok) {
-        throw new Error("Failed to load settings");
-      }
-
-      const data = await response.json();
+      const data = await api.getSettings();
       setSettings(data);
       setError("");
     } catch (err) {
+      if (err instanceof ApiClientError && err.status === 401) {
+        navigate("/admin");
+        return;
+      }
       setError(err instanceof Error ? err.message : "Failed to load settings");
     } finally {
       setLoading(false);
@@ -51,30 +43,17 @@ export default function SettingsPage() {
     setSuccess("");
 
     try {
-      const response = await fetch("/admin/api/settings", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "include",
-        body: JSON.stringify(settings),
+      const result = await api.updateSettings({
+        auto_delete_chat: settings.auto_delete_chat,
       });
-
-      if (response.status === 401) {
-        navigate("/admin");
-        return;
-      }
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || "Failed to save settings");
-      }
-
-      const data = await response.json();
-      setSettings(data.settings);
+      setSettings(result.settings);
       setSuccess("设置已保存");
       setTimeout(() => setSuccess(""), 3000);
     } catch (err) {
+      if (err instanceof ApiClientError && err.status === 401) {
+        navigate("/admin");
+        return;
+      }
       setError(err instanceof Error ? err.message : "Failed to save settings");
     } finally {
       setSaving(false);
