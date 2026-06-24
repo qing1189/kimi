@@ -735,6 +735,13 @@ def _decode_param_value(raw: str) -> Any:
             parsed = json.loads(value)
             return parsed
         except (ValueError, TypeError):
+            # 尝试 JSON 修复
+            repaired = _repair_json(value)
+            if repaired:
+                try:
+                    return json.loads(repaired)
+                except:
+                    pass
             return value
 
     trimmed = raw.strip()
@@ -754,9 +761,58 @@ def _decode_param_value(raw: str) -> Any:
         try:
             return json.loads(trimmed)
         except (ValueError, TypeError):
-            pass
+            # 尝试 JSON 修复
+            repaired = _repair_json(trimmed)
+            if repaired:
+                try:
+                    return json.loads(repaired)
+                except:
+                    pass
 
     return trimmed
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers - JSON repair
+# ---------------------------------------------------------------------------
+
+def _repair_json(text: str) -> str:
+    """尝试修复常见的 JSON 格式问题
+
+    参考 qingdeng888/kimi 项目实现
+
+    Args:
+        text: 可能损坏的 JSON 文本
+
+    Returns:
+        修复后的 JSON 字符串，失败返回空字符串
+    """
+    if not text:
+        return ""
+
+    text = text.strip()
+
+    # 尝试多种修复策略
+    repairs = [
+        # 策略 1: 原始文本
+        lambda t: t,
+        # 策略 2: 移除尾部逗号
+        lambda t: re.sub(r',(\s*[}\]])', r'\1', t),
+        # 策略 3: 单引号转双引号
+        lambda t: t.replace("'", '"'),
+        # 策略 4: 组合修复（移除尾部逗号 + 单引号转双引号）
+        lambda t: re.sub(r',(\s*[}\]])', r'\1', t.replace("'", '"')),
+    ]
+
+    for repair_fn in repairs:
+        try:
+            repaired = repair_fn(text)
+            parsed = json.loads(repaired)
+            return json.dumps(parsed, ensure_ascii=False)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            continue
+
+    return ""
 
 
 # ---------------------------------------------------------------------------

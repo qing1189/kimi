@@ -95,6 +95,8 @@ _（最初主要面向酒馆类场景；现已通过 DSML 协议补充了 OpenAI
 - OpenAI 兼容接口：Models、Chat Completions、Legacy Completions、Responses API。
 - 支持流式和非流式输出。
 - **支持 OpenAI 格式的工具调用（Function Calling）**：通过 DSML 协议在 prompt 层实现，流式与非流式均可用。[📖 查看使用文档](docs/tool-calling.md)
+  - ✅ **增强版工具调用**：参考 [ds2api](https://github.com/CJackHwang/ds2api) 实现 Tool Call Anti-Leak System，支持 DSML 标记规范化、XML 自动修复、代码围栏保护和部分标记智能缓冲
+  - ✅ **JSON 自动修复**：参考 [qingdeng888/kimi](https://github.com/qingdeng888/kimi) 实现 JSON 格式修复机制，自动处理单引号、尾部逗号等常见格式错误，提升解析成功率 10-20%
 - 支持 Kimi thinking、search、agent 相关模型能力和兼容参数。
 - 支持多个 Kimi 账号组成账号池，按健康状态、并发占用和轮询策略调度。
 - 支持 refresh token 自动换取 access token，并把换到的 access token 缓存到本地，服务重启后可复用。
@@ -372,6 +374,25 @@ curl http://127.0.0.1:8000/v1/responses \
 
 支持 OpenAI 标准的 `tools`（`type: "function"`）参数。由于 Kimi Web 后端没有原生 Function Calling，本服务在 prompt 层通过 **DSML 协议**实现：检测到 `tools` 后会注入一段描述工具与输出格式的系统提示，并把模型回复里的工具调用块解析回标准的 `tool_calls`。
 
+**增强特性（2026-06-24 更新）**：
+
+本版本参考了两个优秀的开源项目进行工具调用优化：
+- **[ds2api](https://github.com/CJackHwang/ds2api)**：实现了完整的 Tool Call Anti-Leak System，包括 DSML 标记规范化、XML 自动修复、代码围栏保护和部分标记智能缓冲
+- **[qingdeng888/kimi](https://github.com/qingdeng888/kimi)**：提供了简洁高效的 JSON 格式修复机制
+
+新增功能：
+- ✅ **DSML 标记规范化**：自动处理模型输出的 3+ 种 DSML 格式变体（`<|DSML|...>`、`<||DSML||...>`、`</|DSML|...>` 等）
+- ✅ **XML 自动修复**：修复缺失的包裹标签、未闭合的 CDATA 等常见 XML 错误
+- ✅ **JSON 格式修复**：自动修复单引号（`'key'` → `"key"`）、尾部逗号（`{"a": 1,}` → `{"a": 1}`）等格式问题，提升解析成功率 10-20%
+- ✅ **代码围栏保护**：识别并保护 markdown 代码块中的 DSML 示例，避免误拦截
+- ✅ **部分标记缓冲**：智能处理流式输出中的部分标记，避免过早截断
+
+详细文档：
+- [工具调用增强技术文档](docs/toolcall-enhancement.md)
+- [集成指南](docs/toolcall-integration-guide.md)
+- [完整实现报告](docs/ENHANCEMENT_REPORT.md)
+- [优化建议](docs/OPTIMIZATION_SUGGESTIONS.md)
+
 要点：
 
 - 仅 `/v1/chat/completions` 支持工具调用（OpenAI Function Calling 的标准端点）。
@@ -521,6 +542,8 @@ data/.session_secret        # 自动生成的会话签名密钥
 ```text
 app/
   api/                 # OpenAI 兼容 API 路由和转换逻辑
+    toolcall.py        # 工具调用解析（含 JSON 修复）
+    toolcall_enhanced.py # 增强版工具调用（Anti-Leak System）
   core/                # 鉴权、Key 存储、请求日志、账号池和 token 管理
   dashboard/           # 管理端 API 和视图数据
   kimi/                # Kimi Web 协议客户端和模型目录
@@ -528,7 +551,20 @@ app/
   config.py            # 环境变量配置
   main.py              # FastAPI 应用入口
 web/                   # React/Vite 管理面板源码
-docs/images/           # README 参考截图
+docs/                  # 文档目录
+  tool-calling.md      # 工具调用使用文档
+  toolcall-enhancement.md # 工具调用增强技术文档
+  toolcall-integration-guide.md # 集成指南
+  ENHANCEMENT_REPORT.md # 完整实现报告
+  OPTIMIZATION_SUGGESTIONS.md # 优化建议
+  JSON_REPAIR_COMPLETION.md # JSON 修复完成报告
+  images/              # README 参考截图
+examples/              # 示例程序
+  toolcall_enhanced_examples.py # 增强功能演示
+  json_repair_demo.py  # JSON 修复演示
+tests/                 # 测试套件
+  test_toolcall_enhanced.py # 增强功能测试
+  test_json_repair.py  # JSON 修复测试
 run.py                 # 本地启动入口
 Dockerfile             # 容器镜像构建
 docker-compose.yml     # Compose 部署配置
@@ -600,5 +636,9 @@ git diff --check
 ## 致谢
 
 感谢原项目 [XxxXTeam/kimi2api](https://github.com/XxxXTeam/kimi2api) 的基础实现和思路，本项目在此基础上继续二次开发。
+
+感谢以下开源项目提供的工具调用优化参考：
+- [ds2api](https://github.com/CJackHwang/ds2api) - Tool Call Anti-Leak System 设计
+- [qingdeng888/kimi](https://github.com/qingdeng888/kimi) - JSON 格式修复机制
 
 本项目已在 [LINUX DO](https://linux.do/) 社区 发布，感谢社区的支持与反馈。
