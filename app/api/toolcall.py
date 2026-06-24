@@ -183,6 +183,31 @@ def build_tool_prompt_block(tools: Optional[List[Any]], tool_choice: str = "auto
             f"⚠️ 关键要求：你必须在回复中调用函数 `{fn_name}`。\n"
         )
 
+    # Check if any tool involves file operations (heuristic based on parameter names)
+    has_file_tools = any(
+        any(
+            prop_name in ["file_content", "content", "data", "attachment", "file_data", "base64"]
+            for prop_name in (
+                tool.get("function", {}).get("parameters", {}).get("properties", {}).keys()
+                if isinstance(tool.get("function"), dict)
+                else tool.get("parameters", {}).get("properties", {}).keys()
+            )
+        )
+        for tool in tool_list
+    )
+
+    format_note = ""
+    if has_file_tools:
+        format_note = (
+            "\n\n📝 NOTE: For tools with large data (files, attachments), "
+            "you can use simplified JSON format if DSML is too complex:\n"
+            "```json\n"
+            '{"name": "tool_name", "arguments": {"param": "value"}}\n'
+            "```\n"
+            "注意：对于包含大量数据（文件、附件）的工具，如果 DSML 格式太复杂，"
+            "可以使用简化的 JSON 格式。\n"
+        )
+
     return "\n".join(
         [
             "# TOOL CALLING INSTRUCTIONS / 工具调用指令",
@@ -190,6 +215,7 @@ def build_tool_prompt_block(tools: Optional[List[Any]], tool_choice: str = "auto
             "",
             f"You have access to these tools: {names_line}",
             f"你可以使用以下工具：{names_line}",
+            format_note,
             "",
             "## MANDATORY FORMAT / 必须使用的格式",
             "",
@@ -888,12 +914,19 @@ def _try_parse_json_tool_calls(text: str) -> Optional[Tuple[str, List[Dict[str, 
     """Try to detect and parse JSON-formatted tool calls as a fallback.
 
     Some models may output tool calls in JSON format instead of DSML when
-    the prompt isn't followed perfectly. This catches common patterns like:
+    the prompt isn't followed perfectly, or when dealing with complex data
+    like file contents.
 
+    This catches common patterns like:
     1. {"name": "fn", "arguments": {...}}
     2. [{"type": "function", "function": {"name": "fn", "arguments": "..."}}]
     3. ```json\n{"name": "fn", "parameters": {...}}\n```
     4. function_call: {"name": "fn", "arguments": {...}}
+
+    Enhanced to better handle:
+    - Large data payloads (file contents, base64 data)
+    - Nested JSON structures
+    - Multiple consecutive JSON blocks
     """
     # Look for JSON tool call patterns at the end of the text
     # Only trigger if the text doesn't already have DSML markers
@@ -901,18 +934,17 @@ def _try_parse_json_tool_calls(text: str) -> Optional[Tuple[str, List[Dict[str, 
         return None
 
     # Strategy 1: Try to find a JSON block at the end (possibly in markdown)
-    json_block_match = re.search(
-        r'(?:```(?:json)?\s*\n?)(\[?\s*\{.*?\}\s*\]?)(?:\s*\n?```)?$',
-        text,
-        re.DOTALL,
-    )
-
-    if json_block_match:
-        json_text = json_block_match.group(1).strip()
-        calls = _parse_json_as_tool_calls(json_text)
-        if calls:
-            content = re.sub(r"\s+$", "", text[:json_block_match.start()])
-            return content, calls
+    # Use a simpler approach: find markdown fence and extract content
+    md_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```\s*$', text, re.DOTALL)
+    if md_match:
+        json_text = md_match.group(1).strip()
+        # Check if it looks like a tool call
+        if '"name"' in json_text or '"function"' in json_text:
+            calls = _parse_json_as_tool_calls(json_text)
+            if calls:
+                content = re.sub(r"\s+$", "", text[:md_match.start()])
+                logger.debug("Parsed JSON tool call from markdown block (length: %d)", len(json_text))
+                return content, calls
 
     # Strategy 2: Look for "function_call:" or "tool_calls:" prefix
     prefix_match = re.search(
@@ -925,12 +957,13 @@ def _try_parse_json_tool_calls(text: str) -> Optional[Tuple[str, List[Dict[str, 
         calls = _parse_json_as_tool_calls(json_text)
         if calls:
             content = re.sub(r"\s+$", "", text[:prefix_match.start()])
+            logger.debug("Parsed JSON tool call from prefixed format")
             return content, calls
 
-    # Strategy 3: Try without markdown fences - look for a JSON object/array at the end
-    # that looks like a tool call
+    # Strategy 3: Look for a complete JSON object at the end with tool call structure
+    # This pattern handles both simple and deeply nested objects
     trailing_json_match = re.search(
-        r'(\{[^{}]*"(?:name|function)"[^{}]*"(?:arguments|parameters|params)"[^{}]*\{.*?\}[^{}]*\})\s*$',
+        r'(\{(?:[^{}]|(?:\{(?:[^{}]|\{[^{}]*\})*\}))*"(?:name|function)"(?:[^{}]|(?:\{(?:[^{}]|\{[^{}]*\})*\}))*"(?:arguments|parameters|params)"(?:[^{}]|(?:\{(?:[^{}]|\{[^{}]*\})*\}))*\})\s*$',
         text,
         re.DOTALL,
     )
@@ -939,6 +972,7 @@ def _try_parse_json_tool_calls(text: str) -> Optional[Tuple[str, List[Dict[str, 
         calls = _parse_json_as_tool_calls(json_text)
         if calls:
             content = re.sub(r"\s+$", "", text[:trailing_json_match.start()])
+            logger.debug("Parsed JSON tool call from trailing object (length: %d)", len(json_text))
             return content, calls
 
     # Strategy 4: Look for OpenAI-style function_call in message
@@ -957,6 +991,7 @@ def _try_parse_json_tool_calls(text: str) -> Optional[Tuple[str, List[Dict[str, 
                 "function": {"name": name, "arguments": args_str},
             }]
             content = re.sub(r"\s+$", "", text[:openai_match.start()])
+            logger.debug("Parsed OpenAI-style function_call")
             return content, calls
         except (ValueError, TypeError):
             pass
@@ -965,18 +1000,29 @@ def _try_parse_json_tool_calls(text: str) -> Optional[Tuple[str, List[Dict[str, 
 
 
 def _parse_json_as_tool_calls(json_text: str) -> List[Dict[str, Any]]:
-    """Try to parse a JSON string as tool calls."""
+    """Try to parse a JSON string as tool calls.
+
+    Enhanced to better handle:
+    - Large data payloads (base64, file contents)
+    - Deeply nested structures
+    - Common JSON formatting issues
+    """
     calls: List[Dict[str, Any]] = []
 
     try:
         data = json.loads(json_text)
     except (ValueError, TypeError):
-        # Try fixing common JSON issues
-        try:
-            # Remove trailing commas
-            fixed = re.sub(r',\s*([}\]])', r'\1', json_text)
-            data = json.loads(fixed)
-        except (ValueError, TypeError):
+        # Try the existing JSON repair mechanism
+        repaired = _repair_json(json_text)
+        if repaired:
+            try:
+                data = json.loads(repaired)
+                logger.debug("Successfully repaired and parsed JSON tool call")
+            except (ValueError, TypeError):
+                logger.debug("JSON repair failed for tool call")
+                return []
+        else:
+            logger.debug("Failed to parse JSON tool call (length: %d)", len(json_text))
             return []
 
     if isinstance(data, dict):
