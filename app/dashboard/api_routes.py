@@ -24,6 +24,7 @@ from ..core.kimi_account_store import (
 )
 from ..core.keys import create_key, delete_key
 from ..core.kimi_token_store import save_kimi_token
+from ..core.settings_store import load_settings, save_settings
 from ..core.token_manager import get_token_manager, replace_token_manager
 from ..kimi.protocol import KIMI_SUBSCRIPTION_PATH, KimiAPIError
 from ..kimi.transport import build_kimi_headers
@@ -492,5 +493,37 @@ def create_api_router() -> APIRouter:
         if detail is None:
             return JSONResponse({"error": "Not found"}, status_code=404)
         return JSONResponse(detail)
+
+    @router.get("/settings")
+    async def settings_get(request: Request):
+        if not verify_session(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        return JSONResponse(load_settings())
+
+    @router.post("/settings")
+    async def settings_update(request: Request):
+        if not verify_session(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        if not verify_csrf(request):
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+        # 验证设置
+        auto_delete = body.get("auto_delete_chat")
+        if auto_delete not in {"disabled", "on_completion", "always"}:
+            return JSONResponse(
+                {"error": "auto_delete_chat must be one of: disabled, on_completion, always"},
+                status_code=400
+            )
+
+        try:
+            save_settings(body)
+            return JSONResponse({"success": True, "settings": load_settings()})
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
 
     return router

@@ -8,6 +8,7 @@ import httpx
 
 from ..config import Config as _Config
 from ..core.kimi_account_pool import KimiAccountRuntime, get_account_pool
+from ..core.settings_store import get_auto_delete_chat_mode
 from ..core.token_manager import get_token_manager
 from .chunks import (
     build_chat_completion,
@@ -572,7 +573,8 @@ class Kimi2API:
         final_id = context.remote_chat_id or context.request_conversation_id
 
         # 自动删除会话（如果配置启用）
-        if _Config.AUTO_DELETE_CHAT in {"on_completion", "always"} and context.remote_chat_id:
+        auto_delete_mode = get_auto_delete_chat_mode()
+        if auto_delete_mode in {"on_completion", "always"} and context.remote_chat_id:
             await self.delete_chat(context.remote_chat_id)
 
         return build_chat_completion(
@@ -641,7 +643,8 @@ class Kimi2API:
                                 self._record_runtime_success(runtime)
 
                                 # 自动删除会话（如果配置启用）
-                                if _Config.AUTO_DELETE_CHAT in {"on_completion", "always"} and context.remote_chat_id:
+                                auto_delete_mode = get_auto_delete_chat_mode()
+                                if auto_delete_mode in {"on_completion", "always"} and context.remote_chat_id:
                                     await self.delete_chat(context.remote_chat_id)
                                 return
                         self._record_runtime_success(runtime)

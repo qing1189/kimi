@@ -7,6 +7,7 @@ import KeysPage from "@/pages/KeysPage"
 import LogsPage from "@/pages/LogsPage"
 import LogDetailPage from "@/pages/LogDetailPage"
 import UsagePage from "@/pages/UsagePage"
+import SettingsPage from "@/pages/SettingsPage"
 
 function NotFoundPage() {
   return (
@@ -33,6 +34,7 @@ const router = createBrowserRouter([
       { path: "logs", element: <LogsPage /> },
       { path: "logs/:requestId", element: <LogDetailPage /> },
       { path: "usage", element: <UsagePage /> },
+      { path: "settings", element: <SettingsPage /> },
     ],
   },
   { path: "*", element: <NotFoundPage /> },
