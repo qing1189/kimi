@@ -18,6 +18,7 @@ Optimized implementation with:
 - Improved streaming sieve with better partial block handling
 - Support for tool_choice modes (auto, required, none)
 - Comprehensive logging for debugging tool call failures
+- Debug mode for detailed tool call tracing
 """
 
 import json
@@ -26,7 +27,25 @@ import re
 import secrets
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..config import Config
+
 logger = logging.getLogger("kimi2api.toolcall")
+
+
+def _debug_log(message: str, *args, **kwargs):
+    """详细的调试日志，仅在 DEBUG_TOOL_CALLS=true 时输出"""
+    if Config.DEBUG_TOOL_CALLS:
+        logger.info(f"[TOOL_CALL_DEBUG] {message}", *args, **kwargs)
+
+
+def _log_tool_call_detection(text: str, strategy: str, tool_names: List[str]):
+    """记录工具调用检测结果"""
+    if Config.DEBUG_TOOL_CALLS:
+        logger.info(
+            f"[TOOL_CALL_DEBUG] Strategy '{strategy}' detected {len(tool_names)} tool(s): {tool_names}\n"
+            f"Text length: {len(text)} chars\n"
+            f"Text preview: {text[:200]}..."
+        )
 
 TC_OPEN = "<|DSML|tool_calls>"
 TC_CLOSE = "</|DSML|tool_calls>"
@@ -147,6 +166,8 @@ def build_tool_prompt_block(tools: Optional[List[Any]], tool_choice: str = "auto
     """
     tool_list = _function_tools(tools)
 
+    _debug_log(f"Building tool prompt for {len(tool_list)} tools with tool_choice={tool_choice}")
+
     decls: List[str] = []
     names: List[str] = []
     for tool in tool_list:
@@ -165,6 +186,12 @@ def build_tool_prompt_block(tools: Optional[List[Any]], tool_choice: str = "auto
             except (TypeError, ValueError):
                 params_block = "{}"
         decls.append(f"### {name}\n- Description: {desc}\n- Parameters: {params_block}")
+
+    if Config.DEBUG_TOOL_CALLS:
+        _debug_log(f"Available tools: {names}")
+        for i, tool in enumerate(tool_list):
+            fn = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+            _debug_log(f"Tool {i+1}: {json.dumps(fn, ensure_ascii=False, indent=2)}")
 
     names_line = ", ".join(names) or "(none)"
 
@@ -440,6 +467,10 @@ def parse_tool_calls_from_text(text: Optional[str]) -> Tuple[str, List[Dict[str,
     if not text or not isinstance(text, str):
         return text or "", []
 
+    _debug_log("=== Starting tool call parsing ===")
+    _debug_log(f"Input text length: {len(text)} chars")
+    _debug_log(f"Input text preview: {text[:500]}...")
+
     # Strategy 1: Standard DSML block
     last = _find_last_closed_block(text)
     if last is not None:
@@ -447,30 +478,39 @@ def parse_tool_calls_from_text(text: Optional[str]) -> Tuple[str, List[Dict[str,
         calls = _parse_tool_calls_block(text[start:end])
         if calls:
             content = re.sub(r"\s+$", "", text[:start])
-            logger.debug("Tool calls parsed via standard DSML block: %s", [c["function"]["name"] for c in calls])
+            tool_names = [c["function"]["name"] for c in calls]
+            _log_tool_call_detection(text[start:end], "Standard DSML block", tool_names)
+            logger.debug("Tool calls parsed via standard DSML block: %s", tool_names)
             return content, calls
 
     # Strategy 2: Check for markdown-wrapped DSML block
     calls = _try_parse_markdown_wrapped(text)
     if calls is not None:
         content_text, tool_calls = calls
-        logger.debug("Tool calls parsed via markdown-wrapped DSML: %s", [c["function"]["name"] for c in tool_calls])
+        tool_names = [c["function"]["name"] for c in tool_calls]
+        _log_tool_call_detection(text, "Markdown-wrapped DSML", tool_names)
+        logger.debug("Tool calls parsed via markdown-wrapped DSML: %s", tool_names)
         return content_text, tool_calls
 
     # Strategy 3: Try unclosed DSML block (model forgot closing tag)
     calls = _try_parse_unclosed_block(text)
     if calls is not None:
         content_text, tool_calls = calls
-        logger.debug("Tool calls parsed via unclosed DSML block: %s", [c["function"]["name"] for c in tool_calls])
+        tool_names = [c["function"]["name"] for c in tool_calls]
+        _log_tool_call_detection(text, "Unclosed DSML block", tool_names)
+        logger.debug("Tool calls parsed via unclosed DSML block: %s", tool_names)
         return content_text, tool_calls
 
     # Strategy 4: Fallback JSON tool call detection
     calls = _try_parse_json_tool_calls(text)
     if calls is not None:
         content_text, tool_calls = calls
-        logger.debug("Tool calls parsed via JSON fallback: %s", [c["function"]["name"] for c in tool_calls])
+        tool_names = [c["function"]["name"] for c in tool_calls]
+        _log_tool_call_detection(text, "JSON fallback", tool_names)
+        logger.debug("Tool calls parsed via JSON fallback: %s", tool_names)
         return content_text, tool_calls
 
+    _debug_log("No tool calls detected in response text")
     logger.debug("No tool calls detected in response text (length=%d)", len(text))
     return text, []
 

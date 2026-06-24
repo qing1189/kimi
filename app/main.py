@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import time
 import uuid
 from typing import Any, AsyncIterator, Dict, Optional
@@ -20,6 +21,27 @@ from .api.errors import _json_error
 from .api.models import SERVER_NAME
 from .api.routes import router as api_router
 from .dashboard.api_routes import create_api_router as create_dashboard_api_router
+
+
+def _setup_logging():
+    """配置日志系统"""
+    log_level = getattr(logging, Config.DEBUG_LOG_LEVEL, logging.INFO)
+
+    # 配置根日志记录器
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    # 如果启用了工具调用调试，设置特定的日志级别
+    if Config.DEBUG_TOOL_CALLS:
+        logging.getLogger("kimi2api.toolcall").setLevel(logging.INFO)
+        logging.info("Tool call debugging enabled (DEBUG_TOOL_CALLS=true)")
+
+    # 减少第三方库的日志噪音
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def _request_api_key_name(request: Request) -> str:
@@ -425,6 +447,7 @@ def create_app(initialize: bool = True, static_dir: Optional[str] = None) -> Fas
 def main() -> None:
     """Application entrypoint: load server config and run uvicorn."""
     load_runtime_config()
+    _setup_logging()
 
     host = Config.HOST
     port = Config.PORT

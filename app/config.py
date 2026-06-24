@@ -66,6 +66,9 @@ class Config:
     REQUEST_LOG_RETENTION: int = 1000
     REQUEST_LOG_BODY_LIMIT: int = 1048576
     TIMEZONE: str = "Asia/Shanghai"
+    # 调试日志配置
+    DEBUG_TOOL_CALLS: bool = False  # 启用工具调用详细日志
+    DEBUG_LOG_LEVEL: str = "INFO"  # 日志级别: DEBUG, INFO, WARNING, ERROR
     # HTTP 性能配置
     HTTP_MAX_CONNECTIONS: int = 100
     HTTP_MAX_KEEPALIVE_CONNECTIONS: int = 20
@@ -107,6 +110,9 @@ class Config:
         cls.REQUEST_LOG_RETENTION = int(os.getenv("REQUEST_LOG_RETENTION", "1000"))
         cls.REQUEST_LOG_BODY_LIMIT = _request_log_body_limit()
         cls.TIMEZONE = os.getenv("TIMEZONE") or os.getenv("TZ", "Asia/Shanghai")
+        # 调试日志配置
+        cls.DEBUG_TOOL_CALLS = os.getenv("DEBUG_TOOL_CALLS", "false").lower() in {"1", "true", "yes", "on"}
+        cls.DEBUG_LOG_LEVEL = os.getenv("DEBUG_LOG_LEVEL", "INFO").upper()
         # HTTP 性能配置
         cls.HTTP_MAX_CONNECTIONS = max(int(os.getenv("HTTP_MAX_CONNECTIONS", "100")), 1)
         cls.HTTP_MAX_KEEPALIVE_CONNECTIONS = max(
