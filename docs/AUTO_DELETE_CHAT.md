@@ -27,242 +27,253 @@ Kimi2API 提供自动删除会话功能，可在对话完成后自动清理 Kimi
    - 点击左侧导航栏「系统设置」
 
 3. **选择删除模式**
-   - 不删除（默认）
-   - 对话完成后删除（推荐）
-   - 始终删除
+   - **不删除（默认）**：保留所有会话记录在 Kimi 官网，便于审计和回溯
+   - **对话完成后删除（推荐）**：每次对话成功完成后自动删除，防止历史记录积累
+   - **始终删除**：包括错误情况也删除，最大程度保护隐私
 
 4. **保存设置**
    - 点击「保存设置」按钮
    - 设置立即生效，无需重启服务
 
-5. **测试**
+5. **验证**
    - 发送任意对话请求
-   - 对话完成后检查 Kimi 官网历史记录
+   - 对话完成后检查 [Kimi 官网历史记录](https://www.kimi.com/chat/history)
    - 该会话应已被删除
 
 ---
 
-## ⚙️ 配置选项
+## ⚙️ 配置模式说明
 
-### `AUTO_DELETE_CHAT` 参数
+### 1️⃣ 不删除（disabled）
 
-| 值 | 说明 | 使用场景 |
-|---|---|---|
-| `disabled` | **不自动删除**（默认） | 需要保留历史记录用于审计或回溯 |
-| `on_completion` | **对话完成后删除** | 正常使用，防止历史积累（推荐） |
-| `always` | **始终删除**（包括错误情况） | 最大程度保护隐私 |
+**行为：**
+- 保留所有会话记录在 Kimi 官网
+- 便于审计和回溯历史对话
 
-### 推荐配置
+**适用场景：**
+- 需要保留对话历史用于审计
+- 对隐私要求不高的使用场景
+- 方便查看历史对话内容
 
-**一般使用**（推荐）：
-```bash
-AUTO_DELETE_CHAT=on_completion
-```
-
-**极致隐私保护**：
-```bash
-AUTO_DELETE_CHAT=always
-```
-
-**保留所有记录**（默认）：
-```bash
-AUTO_DELETE_CHAT=disabled
-# 或直接不配置此项
-```
+**注意事项：**
+- 长期使用会导致 Kimi 官网历史记录过多
+- 需要手动定期清理
 
 ---
 
-## 🔍 工作原理
+### 2️⃣ 对话完成后删除（on_completion）⭐ 推荐
+
+**行为：**
+- 对话**成功完成**时自动删除该会话
+- 对话**失败**或**报错**时**不删除**，便于排查问题
+
+**适用场景：**
+- 需要保护隐私，但又要保留失败对话用于调试
+- 平衡隐私保护与问题排查
+- **推荐大多数用户使用此模式**
+
+**注意事项：**
+- 删除失败不会影响正常响应
+- 失败的对话仍会留在 Kimi 官网，需手动清理
+
+**判断依据：**
+- 非流式请求：返回 200 状态码
+- 流式请求：完整接收并返回完成标志
+
+---
+
+### 3️⃣ 始终删除（always）
+
+**行为：**
+- 无论对话成功还是失败，都删除该会话
+- 包括错误情况也会尝试删除
+
+**适用场景：**
+- 对隐私保护要求极高
+- 完全不希望留下任何历史记录
+- 可以通过本地日志排查问题
+
+**注意事项：**
+- 失败的对话也会被删除，可能不便于问题排查
+- 删除失败不会影响正常响应
+
+---
+
+## 🔍 实现原理
 
 ### 删除时机
 
-1. **非流式响应**（`stream=false`）：
-   - 在收到完整响应后
-   - 构建 `ChatCompletion` 对象前
-   - 调用 Kimi 删除接口
-
-2. **流式响应**（`stream=true`）：
-   - 在收到 `done` 事件后
-   - 发送最后的 stop chunk 前
-   - 调用 Kimi 删除接口
-
-### 技术实现
-
 ```python
-# 删除 API 端点
-POST /apiv2/kimi.chat.v1.ChatService/DeleteChat
+# 非流式请求
+async def chat_completion():
+    # ... 完成对话 ...
+    if should_delete():
+        await delete_chat(session_id)
+    return response
 
-# 请求体
+# 流式请求
+async def stream_chat_completion():
+    async for chunk in stream:
+        yield chunk
+    # 流式完成后
+    if should_delete():
+        await delete_chat(session_id)
+```
+
+### 删除 API
+
+使用 Kimi 官方 API：
+
+```http
+DELETE https://kimi.moonshot.cn/api/chat/{chat_id}
+Authorization: Bearer {access_token}
+```
+
+### 错误处理
+
+- 删除操作在**后台异步执行**
+- 删除失败**不会影响**正常的 API 响应
+- 删除失败会记录到日志中
+
+---
+
+## 📊 存储位置
+
+设置保存在 `data/settings.json`：
+
+```json
 {
-  "chat_id": "19efa4e1-5012-834d-8000-092589e39552"
+  "auto_delete_chat": "on_completion",
+  "version": 1
 }
-
-# 响应
-200 OK (删除成功)
 ```
 
-### 删除的是什么？
-
-- **会话 ID**（`remote_chat_id`）：Kimi 服务器分配的唯一标识
-- **官网历史记录**：https://www.kimi.com/chat/history 中的对话条目
-- **不影响**：当前请求的响应内容、本地日志
+- **持久化存储**：重启服务后设置仍然有效
+- **热更新**：通过 Web 管理后台修改后立即生效，无需重启
+- **数据目录**：与 `data/kimi_tokens.json` 在同一目录
 
 ---
 
-## 📝 使用示例
+## 🔒 安全性
 
-### 示例 1：API 调用（Python）
+### 隐私保护
 
-```python
-import openai
+- ✅ 对话内容不会长期留在 Kimi 官网
+- ✅ 减少敏感信息泄露风险
+- ✅ 符合隐私合规要求
 
-client = openai.OpenAI(
-    api_key="your-api-key",
-    base_url="http://localhost:8000/v1"
-)
+### 审计能力
 
-# 配置 AUTO_DELETE_CHAT=on_completion 后
-# 此对话完成后会自动从 Kimi 官网删除
-response = client.chat.completions.create(
-    model="kimi-k2.6",
-    messages=[
-        {"role": "user", "content": "你好"}
-    ]
-)
-
-print(response.choices[0].message.content)
-# Kimi 官网不会有这条对话记录
-```
-
-### 示例 2：流式调用
-
-```python
-# 配置 AUTO_DELETE_CHAT=on_completion 后
-# 流式响应完成时自动删除
-stream = client.chat.completions.create(
-    model="kimi-k2.6",
-    messages=[{"role": "user", "content": "讲个笑话"}],
-    stream=True
-)
-
-for chunk in stream:
-    if chunk.choices[0].delta.content:
-        print(chunk.choices[0].delta.content, end="")
-
-# 流结束后，Kimi 官网已删除该会话
-```
-
-### 示例 3：Hermes 中使用
-
-在 Hermes 中配置 Kimi2API 为 API 提供者：
-
-```
-基础URL: http://your-server:8000/v1
-API Key: your-api-key
-模型: kimi-k2.6
-```
-
-设置 `.env` 中 `AUTO_DELETE_CHAT=on_completion`，每次对话完成后 Kimi 官网不会留下记录。
+- ✅ 本地请求日志仍然保留
+- ✅ 可在管理后台查看请求历史
+- ✅ 删除操作有日志记录
 
 ---
 
-## 🛡️ 隐私保护
+## 🛠️ 故障排查
 
-### 删除成功后
+### 设置不生效
 
-- ✅ Kimi 官网历史记录中**不可见**
-- ✅ 无法通过官网界面恢复
-- ✅ 减少云端数据残留
+**检查步骤：**
 
-### 本地仍然保留
+1. 确认设置已保存：
+   ```bash
+   cat data/settings.json
+   ```
 
-- ✅ Kimi2API 请求日志（`REQUEST_LOG_RETENTION` 控制）
-- ✅ 应用层日志（如 Hermes 的对话记录）
+2. 检查文件权限：
+   ```bash
+   ls -la data/settings.json
+   # 应该可读写
+   ```
 
-### 注意事项
-
-1. **删除是单向操作**：无法恢复已删除的会话
-2. **本地日志独立**：删除官网记录不影响本地日志
-3. **多账号场景**：删除的是当前使用账号的会话
-
----
-
-## ⚠️ 故障处理
+3. 查看日志：
+   ```bash
+   docker compose logs | grep -i delete
+   ```
 
 ### 删除失败
 
-删除失败**不会影响**正常响应：
+**可能原因：**
 
-```python
-# 即使删除失败，用户仍能收到完整响应
-# 只是 Kimi 官网会保留该会话记录
-```
+1. **Token 失效**：Kimi Token 已过期，需要重新配置
+2. **网络问题**：无法连接到 Kimi API
+3. **会话不存在**：可能已被手动删除
 
-### 查看删除日志
-
-启用 DEBUG 日志查看删除详情：
+**排查方法：**
 
 ```bash
-# .env 文件
-DEBUG_LOG_LEVEL=DEBUG
+# 查看删除操作日志
+docker compose logs | grep -i "delete.*chat"
 
-# 查看日志
-docker compose logs -f | grep "delete_chat"
+# 检查 Token 状态
+# 访问管理后台 -> 账号管理 -> 验证 Token
+```
+
+### 删除操作在日志中的标识
+
+正常删除：
+```
+INFO: Deleted chat {chat_id} successfully
+```
+
+删除失败：
+```
+WARNING: Failed to delete chat {chat_id}: {error_message}
 ```
 
 ---
 
-## 🔄 与其他项目对比
+## 📝 常见问题
 
-### ds2api 和 qwen2api
+### Q1: 删除会话会影响 API 响应速度吗？
 
-这些项目也支持会话管理，Kimi2API 的实现参考了它们的设计：
-
-| 功能 | Kimi2API | ds2api/qwen2api |
-|---|---|---|
-| 自动删除会话 | ✅ | ✅ |
-| 配置方式 | 环境变量 | 环境变量 |
-| 删除时机 | on_completion/always | 类似 |
-| 多账号支持 | ✅ | ✅ |
+**A:** 不会。删除操作在返回响应**之后**异步执行，不影响响应时间。
 
 ---
 
-## 🎯 最佳实践
+### Q2: 删除失败会导致请求失败吗？
 
-### 生产环境
-
-```bash
-# 平衡隐私和调试需求
-AUTO_DELETE_CHAT=on_completion
-REQUEST_LOG_RETENTION=100
-DEBUG_LOG_LEVEL=INFO
-```
-
-### 开发调试
-
-```bash
-# 保留会话便于在官网查看
-AUTO_DELETE_CHAT=disabled
-DEBUG_LOG_LEVEL=DEBUG
-```
-
-### 高隐私场景
-
-```bash
-# 最大程度减少数据残留
-AUTO_DELETE_CHAT=always
-REQUEST_LOG_RETENTION=10
-REQUEST_LOG_BODY_LIMIT=0
-```
+**A:** 不会。删除操作失败只会记录日志，不影响正常的 API 响应。
 
 ---
 
-## 📚 相关文档
+### Q3: 可以恢复已删除的会话吗？
 
-- [工具调用调试指南](DEBUG_TOOL_CALLS.md)
-- [配置文件说明](.env.example)
+**A:** 不可以。Kimi 官网的会话一旦删除无法恢复。但本地请求日志仍然保留，可在管理后台查看。
 
 ---
 
-**最后更新**：2026-06-24  
-**版本**：v1.0
+### Q4: 本地日志会被删除吗？
+
+**A:** 不会。本地请求日志独立存储，不受此功能影响，可在「请求日志」页面查看。
+
+---
+
+### Q5: 可以针对不同 API Key 设置不同的删除策略吗？
+
+**A:** 暂不支持。删除策略是全局的，对所有请求生效。
+
+---
+
+## 🔗 相关链接
+
+- [Kimi 官网历史记录](https://www.kimi.com/chat/history)
+- [项目文档](../README.md)
+- [管理后台使用说明](../README.md#管理后台)
+
+---
+
+## 📅 更新日志
+
+### v1.0.0 (2024-06-24)
+
+- ✨ 支持通过 Web 管理后台动态配置
+- ✨ 三种删除模式：不删除、对话完成后删除、始终删除
+- ✨ 设置持久化到 `data/settings.json`
+- ✨ 热更新，无需重启服务
+- 🗑️ 移除环境变量配置方式
+
+### v0.1.0 (2024-06-23)
+
+- ✨ 初始版本，支持环境变量配置
