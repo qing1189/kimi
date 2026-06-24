@@ -20,7 +20,7 @@ export default function SettingsPage() {
 
   const loadSettings = async () => {
     try {
-      const response = await fetch("/api/settings", {
+      const response = await fetch("/admin/api/settings", {
         credentials: "include",
       });
 
@@ -51,7 +51,7 @@ export default function SettingsPage() {
     setSuccess("");
 
     try {
-      const response = await fetch("/api/settings", {
+      const response = await fetch("/admin/api/settings", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
