@@ -69,6 +69,8 @@ class Config:
     # 调试日志配置
     DEBUG_TOOL_CALLS: bool = False  # 启用工具调用详细日志
     DEBUG_LOG_LEVEL: str = "INFO"  # 日志级别: DEBUG, INFO, WARNING, ERROR
+    # 会话管理配置
+    AUTO_DELETE_CHAT: str = "disabled"  # 自动删除会话: disabled, on_completion, always
     # HTTP 性能配置
     HTTP_MAX_CONNECTIONS: int = 100
     HTTP_MAX_KEEPALIVE_CONNECTIONS: int = 20
@@ -113,6 +115,12 @@ class Config:
         # 调试日志配置
         cls.DEBUG_TOOL_CALLS = os.getenv("DEBUG_TOOL_CALLS", "false").lower() in {"1", "true", "yes", "on"}
         cls.DEBUG_LOG_LEVEL = os.getenv("DEBUG_LOG_LEVEL", "INFO").upper()
+        # 会话管理配置
+        auto_delete = os.getenv("AUTO_DELETE_CHAT", "disabled").lower()
+        if auto_delete in {"disabled", "on_completion", "always"}:
+            cls.AUTO_DELETE_CHAT = auto_delete
+        else:
+            cls.AUTO_DELETE_CHAT = "disabled"
         # HTTP 性能配置
         cls.HTTP_MAX_CONNECTIONS = max(int(os.getenv("HTTP_MAX_CONNECTIONS", "100")), 1)
         cls.HTTP_MAX_KEEPALIVE_CONNECTIONS = max(

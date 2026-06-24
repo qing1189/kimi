@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 KIMI_CHAT_PATH = "/apiv2/kimi.gateway.chat.v1.ChatService/Chat"
+KIMI_DELETE_CHAT_PATH = "/apiv2/kimi.chat.v1.ChatService/DeleteChat"
 KIMI_SUBSCRIPTION_PATH = (
     "/apiv2/kimi.gateway.order.v1.SubscriptionService/GetSubscription"
 )

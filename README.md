@@ -97,6 +97,7 @@ _（最初主要面向酒馆类场景；现已通过 DSML 协议补充了 OpenAI
 - **支持 OpenAI 格式的工具调用（Function Calling）**：通过 DSML 协议在 prompt 层实现，流式与非流式均可用。[📖 查看使用文档](docs/tool-calling.md)
   - ✅ **增强版工具调用**：参考 [ds2api](https://github.com/CJackHwang/ds2api) 实现 Tool Call Anti-Leak System，支持 DSML 标记规范化、XML 自动修复、代码围栏保护和部分标记智能缓冲
   - ✅ **JSON 自动修复**：参考 [qingdeng888/kimi](https://github.com/qingdeng888/kimi) 实现 JSON 格式修复机制，自动处理单引号、尾部逗号等常见格式错误，提升解析成功率 10-20%
+- **支持自动删除会话**：参考 [ds2api](https://github.com/CJackHwang/ds2api) 和 [qwen2API](https://github.com/YuJunZhiXue/qwen2API)，可配置对话完成后自动删除 Kimi 官网历史记录，防止会话积累。[📖 查看使用文档](docs/AUTO_DELETE_CHAT.md)
 - 支持 Kimi thinking、search、agent 相关模型能力和兼容参数。
 - 支持多个 Kimi 账号组成账号池，按健康状态、并发占用和轮询策略调度。
 - 支持 refresh token 自动换取 access token，并把换到的 access token 缓存到本地，服务重启后可复用。

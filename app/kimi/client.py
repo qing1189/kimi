@@ -25,6 +25,7 @@ from .events import (
 from .model_catalog import KimiModelSpec
 from .protocol import (
     KIMI_CHAT_PATH,
+    KIMI_DELETE_CHAT_PATH,
     KIMI_RESEARCH_USAGE_PATH,
     KIMI_SUBSCRIPTION_PATH,
     ChatCompletion,
@@ -280,6 +281,32 @@ class Kimi2API:
             return response.json()
         except Exception:
             return None
+
+    async def delete_chat(self, chat_id: str) -> bool:
+        """删除指定的会话
+
+        Args:
+            chat_id: 会话 ID (remote_chat_id)
+
+        Returns:
+            bool: 删除是否成功
+        """
+        try:
+            async with self._acquire_runtime() as runtime:
+                headers = await self._get_headers(
+                    runtime,
+                    {"Content-Type": "application/json"},
+                )
+                response = await runtime.transport.request(
+                    "POST",
+                    KIMI_DELETE_CHAT_PATH,
+                    json={"chat_id": chat_id},
+                    headers=headers,
+                    timeout=15.0,
+                )
+            return response.status_code == 200
+        except Exception:
+            return False
 
     def _build_chat_payload(
         self,
@@ -543,6 +570,11 @@ class Kimi2API:
             raise KimiAPIError(str(last_error))
 
         final_id = context.remote_chat_id or context.request_conversation_id
+
+        # 自动删除会话（如果配置启用）
+        if _Config.AUTO_DELETE_CHAT in {"on_completion", "always"} and context.remote_chat_id:
+            await self.delete_chat(context.remote_chat_id)
+
         return build_chat_completion(
             completion_id=final_id,
             created=created,
@@ -607,6 +639,10 @@ class Kimi2API:
                                 sent_stop = True
                                 yield stop_chunk(chunk_id=chunk_id, created=created, model=model)
                                 self._record_runtime_success(runtime)
+
+                                # 自动删除会话（如果配置启用）
+                                if _Config.AUTO_DELETE_CHAT in {"on_completion", "always"} and context.remote_chat_id:
+                                    await self.delete_chat(context.remote_chat_id)
                                 return
                         self._record_runtime_success(runtime)
                     break
